@@ -1,6 +1,7 @@
 import type { premierepro } from "@adobe/premierepro";
 import type { Effect, PresetFilter } from "../../shared/protocol";
-import { applyEffect, applyPreset, discoverEffects, selectedClips } from "./effects";
+import { applyEffect, applyPreset, discoverEffects, isAudio, isVideo, selectedClips } from "./effects";
+import { runCommand } from "./commands";
 
 const ppro = require("premierepro") as premierepro;
 const { entrypoints } = require("uxp");
@@ -49,8 +50,19 @@ async function handleCommand(connection: WebSocket, message: Record<string, unkn
       const count = await publishCatalog(connection);
       send(connection, { type: "result", id, ok: true, result: { count } });
     } else if (message.command === "check-selection") {
-      await selectedClips(ppro);
+      const { clips } = await selectedClips(ppro);
+      if (message.single === true && clips.length !== 1 && !(
+        clips.length === 2 &&
+        clips.some((clip) => isVideo(ppro, clip)) &&
+        clips.some((clip) => isAudio(ppro, clip)) &&
+        (await clips[0].getProjectItem()).getId() === (await clips[1].getProjectItem()).getId() &&
+        (await clips[0].getStartTime()).ticks === (await clips[1].getStartTime()).ticks &&
+        (await clips[0].getEndTime()).ticks === (await clips[1].getEndTime()).ticks
+      )) throw new Error("Select one source clip to copy.");
       send(connection, { type: "result", id, ok: true, result: {} });
+    } else if (message.command === "palette-command") {
+      const result = await runCommand(ppro, message.action, message.value);
+      send(connection, { type: "result", id, ok: true, result });
     } else if (message.command === "apply") {
       const rawId = String(message.effectId);
       const effect = catalog.get(rawId) ?? (

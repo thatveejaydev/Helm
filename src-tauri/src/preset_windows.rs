@@ -16,6 +16,30 @@ impl Drop for ComApartment {
     }
 }
 
+pub fn attributes_shortcut(target: isize, paste: bool) -> Result<(), String> {
+    let modifier_held = [VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN]
+        .iter()
+        .any(|modifier| unsafe { GetAsyncKeyState(i32::from(modifier.0)) } < 0);
+    if modifier_held {
+        return Err("Release the modifier keys before running the command.".into());
+    }
+    let down = KEYBD_EVENT_FLAGS(0);
+    let mut input = vec![key(VK_CONTROL, 0, down)];
+    if paste {
+        input.push(key(VK_MENU, 0, down));
+    }
+    let letter = if paste { VK_V } else { VK_C };
+    input.extend([key(letter, 0, down), key(letter, 0, KEYEVENTF_KEYUP)]);
+    if paste {
+        input.push(key(VK_MENU, 0, KEYEVENTF_KEYUP));
+    }
+    input.push(key(VK_CONTROL, 0, KEYEVENTF_KEYUP));
+    if crate::platform::foreground_premiere() != Some(target) {
+        return Err("Premiere did not regain focus. Open Helm from the timeline and try again.".into());
+    }
+    inject(&input)
+}
+
 pub fn reveal(window: isize, preset: &Preset) -> Result<(), String> {
     unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok() }
         .map_err(|error| format!("Could not initialize Windows accessibility: {error}"))?;

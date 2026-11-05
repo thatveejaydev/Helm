@@ -1,19 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { ApplyResult, BridgeSnapshot, CatalogItem, Preset } from "../shared/protocol";
-import { indexEffects, searchEffects, type SearchEntry } from "./search";
+import type { ApplyResult, BridgeSnapshot, CatalogItem, Preset, SequenceMarker } from "../shared/protocol";
+import { indexEffects, normalize, searchEffects, type SearchEntry } from "./search";
 import { captureShortcut } from "./shortcut";
 import "./style.css";
 
 document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
-  <header class="topbar" data-tauri-drag-region>
-    <div class="brand"><span class="brand-mark">H</span> HELM <span class="brand-description">PREMIERE PRO</span></div>
-    <div class="top-actions"><span id="connection" class="connection">Connecting</span><button id="settings-toggle" class="icon-button" aria-label="Connection settings" title="Connection settings">⚙</button><button id="close" class="icon-button" aria-label="Hide palette" title="Hide palette">×</button></div>
-  </header>
   <section id="palette">
-    <div class="search-box"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" stroke="currentColor" stroke-width="1.7"/><path d="m16 16 4.5 4.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg><input id="search" placeholder="Find an effect or preset…" aria-label="Search Premiere effects and presets" role="combobox" aria-autocomplete="list" aria-controls="results" aria-expanded="true" autocomplete="off" spellcheck="false" /><kbd>ESC</kbd></div>
-    <div class="filterbar"><div class="filters" aria-label="Result type"><button class="filter active" data-kind="all" aria-pressed="true">All</button><button class="filter" data-kind="video" aria-pressed="false">Video</button><button class="filter" data-kind="audio" aria-pressed="false">Audio</button><button class="filter" data-kind="preset" aria-pressed="false">Presets</button></div><span id="count"></span></div>
-    <div id="results" role="listbox" aria-label="Effects"></div>
+    <div class="search-box"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" stroke="currentColor" stroke-width="1.7"/><path d="m16 16 4.5 4.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg><input id="search" placeholder="Find an effect, preset, or command…" aria-label="Search Premiere effects, presets, and commands" role="combobox" aria-autocomplete="list" aria-controls="results" aria-expanded="true" autocomplete="off" spellcheck="false" /><kbd>ESC</kbd></div>
+    <div id="results" role="listbox" aria-label="Palette results"></div>
     <div id="empty" class="empty" hidden><span class="empty-symbol">⌕</span><h2 id="empty-title"></h2><p id="empty-message"></p><button id="setup-button" class="secondary" hidden>Connect to Premiere</button></div>
   </section>
   <section id="settings" hidden>
@@ -23,7 +18,11 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
     <div class="shortcut-row"><span>Open while editing</span><div class="shortcut-controls"><button id="record-shortcut" class="shortcut-button" type="button" aria-label="Change shortcut" title="Click to record a new shortcut"><kbd id="shortcut">Ctrl + Alt + Space</kbd></button><button id="reset-shortcut" class="shortcut-reset" type="button" aria-label="Reset to default shortcut" title="Reset to default (Ctrl + Alt + Space)">↺</button></div></div>
     <div class="settings-actions"><button id="back" class="secondary">Back to search</button><button id="refresh" class="primary">Refresh effects and presets</button></div>
   </section>
-  <footer><span id="status" role="status">Ready when you are.</span><span class="key-hints"><kbd>↑</kbd><kbd>↓</kbd> navigate <kbd>↵</kbd> apply</span></footer>
+  <footer data-tauri-drag-region>
+    <div class="brand"><span class="brand-mark">H</span> HELM</div>
+    <div class="footer-info"><span id="status" role="status">Ready when you are.</span></div>
+    <div class="footer-actions"><span id="connection" class="connection">Connecting</span><button id="settings-toggle" class="icon-button" aria-label="Connection settings" title="Connection settings">⚙</button></div>
+  </footer>
 `;
 
 function element<T extends HTMLElement>(id: string): T {
@@ -34,9 +33,28 @@ const input = element<HTMLInputElement>("search");
 const results = element<HTMLDivElement>("results");
 let snapshot: BridgeSnapshot | undefined;
 let index: SearchEntry[] = [];
-let visible: CatalogItem[] = [];
+interface CommandItem {
+  kind: "command";
+  id: string;
+  name: string;
+  description: string;
+  argument?: string;
+  value?: string;
+}
+
+const commands: CommandItem[] = [
+  { kind: "command", id: "copy-attributes", name: "Copy Attributes", description: "Copy source clip in Premiere" },
+  { kind: "command", id: "paste-attributes", name: "Paste Attributes", description: "Open Premiere’s paste dialog" },
+  { kind: "command", id: "remove-attributes", name: "Remove Attributes", description: "Clear applied effects" },
+  { kind: "command", id: "add-marker", name: "Add Marker", description: "Add a marker at the playhead", argument: "Marker name" },
+  { kind: "command", id: "go-to-marker", name: "Go to Marker", description: "Find a marker in the active sequence" },
+  { kind: "command", id: "set-opacity", name: "Set Opacity", description: "Set static clip opacity", argument: "Opacity (0–100%)" },
+  { kind: "command", id: "set-volume", name: "Set Clip Volume", description: "Set static clip volume", argument: "Volume (−100 to +15 dB)" },
+];
+type PaletteItem = CatalogItem | CommandItem;
+let visible: PaletteItem[] = [];
 let presets: Preset[] = [];
-let kind: CatalogItem["kind"] | "all" = "all";
+let markers: SequenceMarker[] | undefined;
 let selected = 0;
 let busy = false;
 let settingsOpen = false;
@@ -73,8 +91,40 @@ function openSettings(open: boolean): void {
   if (!open) input.focus();
 }
 
+function matchingCommands(query: string): CommandItem[] {
+  const search = normalize(query);
+  if (markers && (search === "go to marker" || search.startsWith("go to marker "))) {
+    const filter = search.slice("go to marker".length).trim();
+    return markers.filter((marker) => normalize(marker.name).includes(filter)).slice(0, 60).map((marker) => {
+      const milliseconds = Math.max(0, Math.floor(marker.seconds * 1000));
+      const seconds = Math.floor(milliseconds / 1000);
+      const time = [Math.floor(seconds / 3600), Math.floor(seconds / 60) % 60, seconds % 60]
+        .map((part) => String(part).padStart(2, "0")).join(":") +
+        "." + String(milliseconds % 1000).padStart(3, "0");
+      return { kind: "command", id: "go-to-marker", name: marker.name || "Untitled marker", description: time, value: marker.id };
+    });
+  }
+  return commands.flatMap((command) => {
+    const name = normalize(command.name);
+    const aliases = command.id === "set-opacity" ? [name, "opacity"] :
+      command.id === "set-volume" ? [name, "set volume", "volume"] : [name];
+    const prefix = aliases.find((alias) => search.startsWith(alias + " "));
+    if (prefix && (command.argument || command.id === "go-to-marker")) {
+      const value = query.trim().slice(prefix.length).trim();
+      return [{ ...command, value, name: `${command.name} · ${value}` }];
+    }
+    return aliases.some((alias) => search.split(/\s+/).every((word) => alias.includes(word))) ? [command] : [];
+  });
+}
+
 function render(): void {
-  visible = searchEffects(index, input.value, kind, recent, input.value.trim() ? 60 : 9);
+  const query = input.value;
+  const commandResults = query.trim() ? matchingCommands(query) : [];
+  const markerSearch = markers && /^go to marker(?:\s|$)/i.test(query.trimStart());
+  const effects = markerSearch ? [] : searchEffects(index, query, "all", recent, query.trim() ? 60 : 9);
+  const exact = normalize(query);
+  const primaryCommands = commandResults.filter((item) => item.value !== undefined || normalize(item.name) === exact);
+  visible = [...primaryCommands, ...effects, ...commandResults.filter((item) => !primaryCommands.includes(item))].slice(0, 60);
   selected = Math.min(selected, Math.max(0, visible.length - 1));
   results.replaceChildren();
   for (const [position, effect] of visible.entries()) {
@@ -85,7 +135,7 @@ function render(): void {
     row.setAttribute("aria-selected", String(position === selected));
     const icon = document.createElement("span");
     icon.className = `effect-icon ${effect.kind}`;
-    icon.textContent = { video: "ƒx", audio: "♫", preset: "◇" }[effect.kind];
+    icon.textContent = { video: "ƒx", audio: "♫", preset: "◇", command: "⌘" }[effect.kind];
     const name = document.createElement("span");
     name.className = "effect-name";
     name.textContent = effect.name;
@@ -95,6 +145,8 @@ function render(): void {
       type.textContent = effect.folders.slice(-2).join(" › ");
       type.title = `Preset · ${effect.folders.join(" › ")}`;
       row.title = `${effect.name} · ${type.title}`;
+    } else if (effect.kind === "command") {
+      type.textContent = effect.description;
     } else {
       type.textContent = effect.kind === "video" ? "Video effect" : "Audio effect";
     }
@@ -107,12 +159,12 @@ function render(): void {
     results.append(row);
   }
   input.setAttribute("aria-activedescendant", visible.length ? `effect-${selected}` : "");
-  element("count").textContent = kind === "preset" ? `${presets.length} presets` : `${index.length} available`;
   element("empty").hidden = visible.length > 0;
   if (!visible.length) {
     const connected = snapshot?.connected;
-    element("empty-title").textContent = index.length ? "No matching results" : connected ? "Getting your effects…" : "Connect to Premiere";
-    element("empty-message").textContent = index.length ? "Try a shorter name or a different filter." : connected ? "Reading the effects installed in Premiere." : "Connect the Helm Bridge panel in Premiere to get started.";
+    const noMatches = index.length || markers;
+    element("empty-title").textContent = noMatches ? "No matching results" : connected ? "Getting your effects…" : "Connect to Premiere";
+    element("empty-message").textContent = noMatches ? "Try a shorter name." : connected ? "Reading the effects installed in Premiere." : "Connect the Helm Bridge panel in Premiere to get started.";
     element("setup-button").hidden = !!connected;
   }
 }
@@ -127,7 +179,38 @@ function select(position: number): void {
   results.children[selected]?.scrollIntoView({ block: "nearest" });
 }
 
-async function apply(effect: CatalogItem): Promise<void> {
+async function runCommand(command: CommandItem): Promise<void> {
+  const invokeCommand = (action: string, value?: string | number) =>
+    invoke<{ message?: string; markers?: SequenceMarker[]; native?: boolean }>("run_palette_command", { action, value });
+  if (command.id === "go-to-marker" && !markers) {
+    const result = await invokeCommand("list-markers");
+    markers = result.markers ?? [];
+    input.value = command.value ? `Go to Marker ${command.value}` : "Go to Marker ";
+    selected = 0;
+    render();
+    input.focus();
+    setStatus(markers.length ? "Type a marker name, then press Enter to jump." : "This sequence has no markers.");
+    return;
+  }
+  if (command.argument && !command.value) {
+    input.value = command.name + " ";
+    input.focus();
+    setStatus(command.argument);
+    return;
+  }
+  let value: string | number | undefined = command.value;
+  if (command.id === "set-opacity" || command.id === "set-volume") {
+    const opacity = command.id === "set-opacity";
+    const number = value?.replace(opacity ? /\s*%$/ : /\s*dB$/i, "").trim() ?? "";
+    if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(number)) throw new Error(`Enter a numeric value. ${command.argument}.`);
+    value = Number(number);
+  }
+  const result = await invokeCommand(command.id, value);
+  setStatus(result.message ?? "Done.");
+  if (!result.native) await invoke("dismiss_palette", { restoreFocus: true });
+}
+
+async function apply(effect: PaletteItem): Promise<void> {
   if (busy) return;
   if (!snapshot?.connected) { setStatus("Connect the Helm panel in Premiere first.", true); return; }
   busy = true;
@@ -135,6 +218,10 @@ async function apply(effect: CatalogItem): Promise<void> {
   const isRevealPreset = effect.kind === "preset" && !effect.directApply;
   setStatus(isRevealPreset ? `Locating ${effect.name}…` : `Applying ${effect.name}…`);
   try {
+    if (effect.kind === "command") {
+      await runCommand(effect);
+      return;
+    }
     if (effect.kind === "preset") {
       const result = await invoke<ApplyResult & { revealed?: boolean }>("apply_preset", { presetId: effect.id });
       if (result?.revealed) {
@@ -169,7 +256,7 @@ function update(next: BridgeSnapshot): void {
   }
   element("reset-shortcut").hidden = next.shortcut === "Ctrl+Alt+Space";
   if (next.error) setStatus(next.error, true);
-  else if (!busy) setStatus(next.connected ? "Select a timeline clip, find an effect, press Enter." : "Connect the Premiere panel to load your effects.");
+  else if (!busy) setStatus(next.connected ? "" : "Connect the Premiere panel to load your effects.");
   render();
 }
 
@@ -183,7 +270,11 @@ async function loadPresets(refresh = false): Promise<void> {
   render();
 }
 
-input.addEventListener("input", () => { selected = 0; render(); });
+input.addEventListener("input", () => {
+  if (!/^go to marker(?:\s|$)/i.test(input.value.trimStart())) markers = undefined;
+  selected = 0;
+  render();
+});
 input.addEventListener("compositionstart", () => { composing = true; });
 input.addEventListener("compositionend", () => { composing = false; });
 document.addEventListener("keydown", async (event) => {
@@ -233,24 +324,9 @@ document.addEventListener("keydown", async (event) => {
   }
 });
 
-for (const filter of document.querySelectorAll<HTMLButtonElement>("[data-kind]")) {
-  filter.addEventListener("click", () => {
-    kind = filter.dataset.kind as CatalogItem["kind"] | "all";
-    for (const button of document.querySelectorAll("[data-kind]")) {
-      button.classList.toggle("active", button === filter);
-      button.setAttribute("aria-pressed", String(button === filter));
-    }
-    selected = 0;
-    render();
-    if (kind === "preset") setStatus("Select a preset to locate it in Premiere's Effects panel.");
-    input.focus();
-  });
-}
-
 element("settings-toggle").addEventListener("click", () => openSettings(!settingsOpen));
 element("setup-button").addEventListener("click", () => openSettings(true));
 element("back").addEventListener("click", () => openSettings(false));
-element("close").addEventListener("click", () => { if (!busy) void invoke("dismiss_palette", { restoreFocus: true }); });
 element("copy-key").addEventListener("click", async () => {
   try {
     await navigator.clipboard.writeText(snapshot?.pairingKey || "");
@@ -294,6 +370,7 @@ async function start(): Promise<void> {
   await listen("palette-opened", () => {
     if (busy) return;
     input.value = "";
+    markers = undefined;
     selected = 0;
     openSettings(false);
     render();

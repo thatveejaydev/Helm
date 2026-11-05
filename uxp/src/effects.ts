@@ -26,11 +26,11 @@ export async function discoverEffects(ppro: premierepro): Promise<Effect[]> {
   return Array.from(effects.values());
 }
 
-function isVideo(ppro: premierepro, clip: Clip): clip is VideoClipTrackItem {
+export function isVideo(ppro: premierepro, clip: Clip): clip is VideoClipTrackItem {
   return clip instanceof (ppro.VideoClipTrackItem as unknown as { new (): VideoClipTrackItem });
 }
 
-function isAudio(ppro: premierepro, clip: Clip): clip is AudioClipTrackItem {
+export function isAudio(ppro: premierepro, clip: Clip): clip is AudioClipTrackItem {
   return clip instanceof (ppro.AudioClipTrackItem as unknown as { new (): AudioClipTrackItem });
 }
 

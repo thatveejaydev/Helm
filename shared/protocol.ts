@@ -49,3 +49,9 @@ export interface ApplyResult {
   applied: number;
   skipped: number;
 }
+
+export interface SequenceMarker {
+  id: string;
+  name: string;
+  seconds: number;
+}

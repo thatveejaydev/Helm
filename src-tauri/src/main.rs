@@ -28,9 +28,7 @@ fn show_palette(app: &tauri::AppHandle, target: Option<isize>) {
     if let Ok(hwnd) = window.hwnd() {
         platform::style_window(hwnd.0 as _);
     }
-    if let Some(target) = target.filter(|&h| h != 0) {
-        app.state::<FocusTarget>().0.store(target, Ordering::Relaxed);
-    }
+    app.state::<FocusTarget>().0.store(target.unwrap_or(0), Ordering::Relaxed);
     let monitor = target
         .and_then(platform::window_center)
         .and_then(|(x, y)| window.monitor_from_point(x.into(), y.into()).ok().flatten());
@@ -83,6 +81,57 @@ async fn refresh_catalog(
     state: tauri::State<'_, Arc<bridge::Bridge>>,
 ) -> Result<serde_json::Value, String> {
     state.request("refresh", serde_json::json!({})).await
+}
+
+#[tauri::command]
+async fn run_palette_command(
+    app: tauri::AppHandle,
+    action: String,
+    value: Option<serde_json::Value>,
+    state: tauri::State<'_, Arc<bridge::Bridge>>,
+) -> Result<serde_json::Value, String> {
+    match action.as_str() {
+        "copy-attributes" | "paste-attributes" => {
+            #[cfg(windows)]
+            {
+                let paste = action == "paste-attributes";
+                let target = app.state::<FocusTarget>().0.load(Ordering::Relaxed);
+                if target == 0 {
+                    return Err("Open Helm with its shortcut from the Premiere timeline.".into());
+                }
+                state.request("check-selection", serde_json::json!({ "single": !paste })).await?;
+                let window = app.get_webview_window("palette").ok_or("Helm's palette is unavailable.")?;
+                if !window.is_focused().unwrap_or(false)
+                    || app.state::<FocusTarget>().0.load(Ordering::Relaxed) != target
+                {
+                    return Err("Helm lost focus. Open the palette and try again.".into());
+                }
+                window.hide().map_err(|error| error.to_string())?;
+                platform::restore_focus(target);
+                let result = tauri::async_runtime::spawn_blocking(move || {
+                    preset_windows::attributes_shortcut(target, paste)
+                }).await.map_err(|error| error.to_string()).and_then(|result| result);
+                if result.is_err() && platform::foreground_premiere() == Some(target) {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+                result?;
+                Ok(serde_json::json!({
+                    "message": if paste { "Sent Paste Attributes to Premiere." } else { "Sent Copy to Premiere." },
+                    "native": true
+                }))
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = app;
+                Err("Copy and Paste Attributes are available on Windows.".into())
+            }
+        }
+        "remove-attributes" | "set-opacity" | "set-volume" | "add-marker" | "list-markers" | "go-to-marker" => {
+            state.request("palette-command", serde_json::json!({ "action": action, "value": value })).await
+        }
+        _ => Err("Unsupported Helm command.".into()),
+    }
 }
 
 #[tauri::command]
@@ -214,6 +263,7 @@ fn main() {
             get_snapshot,
             apply_effect,
             refresh_catalog,
+            run_palette_command,
             get_presets,
             apply_preset,
             set_shortcut,
