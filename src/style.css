@@ -81,4 +81,9 @@ footer { min-height: 51px; flex-shrink: 0; display: flex; align-items: center; g
 .shortcut-reset { font-size: 13px; width: 24px; height: 24px; display: grid; place-items: center; color: #727780; padding: 0; border: 1px solid #33353b; background: #1a1c20; border-radius: 4px; cursor: pointer; }
 .shortcut-reset:hover { color: #d0d1d6; background: #26292f; border-color: #4a4e57; }
 .settings-actions { display: flex; justify-content: space-between; }
+.project-debug { margin-top: 16px; color: #a2a0ab; font-size: 11px; }
+.project-debug label { display: flex; align-items: center; gap: 6px; }
+#project-log { max-height: 130px; overflow: auto; margin: 8px 0 0; padding: 8px; list-style: none; background: #171719; border: 1px solid #34343a; overflow-wrap: anywhere; }
+#project-log:empty::before { content: "No Project scans requested this session."; }
+#project-log li + li { margin-top: 5px; }
 .busy .effect-row { cursor: wait; }

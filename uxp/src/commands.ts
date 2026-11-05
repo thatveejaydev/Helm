@@ -1,5 +1,5 @@
 import type { Action, AudioTrack, ClipProjectItem, Component, FolderItem, Project, ProjectItem, Sequence, VideoTrack, premierepro } from "@adobe/premierepro";
-import type { ProjectMedia, ProjectMediaCatalog } from "../../shared/protocol";
+import type { ProjectCatalogKey, ProjectCatalogReply, ProjectMedia, ProjectMediaCatalog } from "../../shared/protocol";
 import { discoverEffects, isAudio, isVideo, selectedClips } from "./effects";
 
 function commit(project: Project, label: string, createActions: () => Action[]): void {
@@ -100,6 +100,26 @@ async function listProjectMedia(ppro: premierepro): Promise<ProjectMediaCatalog>
     items.push({ id, name: item.name, bins, binIds, mediaType });
   }
   return { projectId: project.guid.toString(), items };
+}
+
+export async function readProjectCatalog(
+  ppro: premierepro, known: unknown, revision: () => number,
+): Promise<ProjectCatalogReply> {
+  const getKey = async (): Promise<ProjectCatalogKey> => {
+    const project = await ppro.Project.getActiveProject();
+    if (!project) throw new Error("Open a Premiere project first.");
+    const sequence = await project.getActiveSequence();
+    return { projectId: project.guid.toString(), sequenceId: sequence?.guid.toString() ?? null, revision: revision() };
+  };
+  const key = await getKey();
+  const matches = (other?: Partial<ProjectCatalogKey> | null) =>
+    key.projectId === other?.projectId && key.sequenceId === other.sequenceId && key.revision === other.revision;
+  if (matches(known as Partial<ProjectCatalogKey> | null)) return { key };
+  const catalog = await listProjectMedia(ppro);
+  if (catalog.projectId !== key.projectId || !matches(await getKey())) {
+    throw new Error("The Premiere project changed during the scan.");
+  }
+  return { key, catalog };
 }
 
 async function openProjectSource(ppro: premierepro, value: unknown) {

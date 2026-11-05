@@ -67,3 +67,14 @@ export interface ProjectMediaCatalog {
   projectId: string;
   items: ProjectMedia[];
 }
+
+export interface ProjectCatalogKey {
+  projectId: string;
+  sequenceId: string | null;
+  revision: number;
+}
+
+export interface ProjectCatalogReply {
+  key: ProjectCatalogKey;
+  catalog?: ProjectMediaCatalog;
+}

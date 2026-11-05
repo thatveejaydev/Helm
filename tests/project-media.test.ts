@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { premierepro } from "@adobe/premierepro";
 import { indexEffects, indexProjectMedia, mergeSearchResults, rankEffects, rankProjectMedia, searchProjectMedia } from "../src/search";
-import { runCommand } from "../uxp/src/commands";
+import { readProjectCatalog, runCommand } from "../uxp/src/commands";
 
 test("All search ranks a close filename match above a loose preset match", () => {
   const name = "achievement_sfx.mp3";
@@ -105,6 +105,24 @@ test("project search indexes media and sequences by name and bin path and exclud
     { id: "nest", name: "Review Cut", bins: ["Interviews"], binIds: ["interviews"], mediaType: "sequence" },
   ]);
   assert.equal(searchProjectMedia(indexProjectMedia(catalog.items), "interviews")[0].mediaType, "bin");
+});
+
+test("project catalog reuses the current revision and rescans on edits or project switches", async () => {
+  const { host, media, switchProject } = fixture();
+  let scans = 0;
+  media.getMediaFilePath = async () => { scans++; return "Cam B 001.mov"; };
+  let revision = 0;
+  const read = (known?: unknown) => readProjectCatalog(host, known, () => revision);
+  const first = await read();
+  assert.ok(first.catalog);
+  assert.deepEqual(await read(first.key), { key: first.key });
+  assert.equal(scans, 1);
+  revision++;
+  const changed = await read(first.key);
+  assert.ok(changed.catalog);
+  switchProject();
+  assert.equal((await read(changed.key)).catalog?.projectId, "other");
+  assert.equal(scans, 3);
 });
 
 test("project insert routes a sequence to a free track and rejects circular nesting", async () => {

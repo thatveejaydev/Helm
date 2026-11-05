@@ -1,7 +1,7 @@
 import type { premierepro } from "@adobe/premierepro";
 import type { Effect, PresetFilter } from "../../shared/protocol";
 import { applyEffect, applyPreset, discoverEffects, isAudio, isVideo, selectedClips } from "./effects";
-import { runCommand } from "./commands";
+import { readProjectCatalog, runCommand } from "./commands";
 
 const ppro = require("premierepro") as premierepro;
 const { entrypoints, storage } = require("uxp");
@@ -16,6 +16,16 @@ let busy = false;
 let authenticated = false;
 let statusText = "Waiting for the Helm desktop app…";
 let bindPending = false;
+let projectRevision = 0;
+let projectScanRunning = false;
+
+function notifyProjectChange(reset: boolean): void {
+  projectRevision++;
+  if (socket && authenticated) send(socket, { type: "project-catalog-changed", reset });
+}
+
+const projectActivated = () => notifyProjectChange(true);
+const projectDirty = () => notifyProjectChange(false);
 
 function status(message: string): void {
   statusText = message;
@@ -40,6 +50,22 @@ async function publishCatalog(connection: WebSocket): Promise<number> {
 async function handleCommand(connection: WebSocket, message: Record<string, unknown>): Promise<void> {
   if (typeof message.id !== "string") return;
   const id = message.id;
+  if (message.command === "project-catalog") {
+    if (projectScanRunning) {
+      send(connection, { type: "result", id, ok: false, error: "Premiere is already scanning the project." });
+      return;
+    }
+    projectScanRunning = true;
+    try {
+      const result = await readProjectCatalog(ppro, message.value, () => projectRevision);
+      send(connection, { type: "result", id, ok: true, result });
+    } catch (error) {
+      send(connection, { type: "result", id, ok: false, error: errorMessage(error) });
+    } finally {
+      projectScanRunning = false;
+    }
+    return;
+  }
   if (busy) {
     send(connection, { type: "result", id, ok: false, error: "Premiere is already handling a Helm command." });
     return;
@@ -172,6 +198,11 @@ async function connect(): Promise<void> {
 }
 
 function stop(): void {
+  if (running) {
+    ppro.EventManager.removeGlobalEventListener(ppro.ProjectEvent.EVENT_ACTIVATED, projectActivated);
+    ppro.EventManager.removeGlobalEventListener(ppro.ProjectClosedEvent.EVENT_CLOSED, projectActivated);
+    ppro.EventManager.removeGlobalEventListener(ppro.ProjectEvent.EVENT_DIRTY, projectDirty);
+  }
   running = false;
   generation++;
   clearTimeout(reconnect);
@@ -201,6 +232,9 @@ function start(): void {
   bindPanel();
   if (running) return;
   running = true;
+  ppro.EventManager.addGlobalEventListener(ppro.ProjectEvent.EVENT_ACTIVATED, projectActivated);
+  ppro.EventManager.addGlobalEventListener(ppro.ProjectClosedEvent.EVENT_CLOSED, projectActivated);
+  ppro.EventManager.addGlobalEventListener(ppro.ProjectEvent.EVENT_DIRTY, projectDirty);
   retryMs = 750;
   void connect();
 }

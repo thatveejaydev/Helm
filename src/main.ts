@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { ApplyResult, BridgeSnapshot, CatalogItem, Preset, ProjectMedia, ProjectMediaCatalog, SequenceMarker } from "../shared/protocol";
+import type { ApplyResult, BridgeSnapshot, CatalogItem, Preset, ProjectMedia, ProjectCatalogKey, ProjectCatalogReply, SequenceMarker } from "../shared/protocol";
 import { indexEffects, indexProjectMedia, mergeSearchResults, normalize, rankEffects, rankProjectMedia, score, type SearchEntry } from "./search";
 import { captureShortcut } from "./shortcut";
 import "./style.css";
@@ -22,7 +22,11 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
     <div class="section-heading"><span class="eyebrow">CONNECTION</span><h1>Meet your new shortcut.</h1><p>Helm connects automatically when Helm Bridge is loaded in Premiere.</p></div>
     <ol class="setup-steps"><li><span>1</span><div>Load the Premiere plugin<small>In UXP Developer Tools, add <strong>uxp/dist/manifest.json</strong> and click Load.</small></div></li></ol>
     <div class="shortcut-row"><span>Open while editing</span><div class="shortcut-controls"><button id="record-shortcut" class="shortcut-button" type="button" aria-label="Change shortcut" title="Click to record a new shortcut"><kbd id="shortcut">Ctrl + Alt + Space</kbd></button><button id="reset-shortcut" class="shortcut-reset" type="button" aria-label="Reset to default shortcut" title="Reset to default (Ctrl + Alt + Space)">↺</button></div></div>
-    <div class="settings-actions"><button id="back" class="secondary">Back to search</button><button id="refresh" class="primary">Refresh effects and presets</button></div>
+    <div class="settings-actions"><button id="back" class="secondary">Back to search</button><button id="refresh" class="primary">Refresh catalogs</button></div>
+    <div class="project-debug">
+      <label><input id="show-project-log" type="checkbox" aria-controls="project-log" /> Show Project scan log</label>
+      <ol id="project-log" aria-label="Recent Project scans" hidden></ol>
+    </div>
   </section>
   <footer id="palette-footer" data-tauri-drag-region hidden>
     <div class="brand"><span class="brand-mark">H</span> HELM</div>
@@ -67,6 +71,12 @@ const expandedBins = new Set<string>();
 let projectId: string | undefined;
 let projectIndex: ReturnType<typeof indexProjectMedia> = [];
 let projectLoading = false;
+let projectCacheKey: ProjectCatalogKey | undefined;
+let projectScannedAt = 0;
+let projectCacheGeneration = 0;
+let projectRefreshPending = false;
+let projectRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+let projectScanCount = 0;
 let projectError = "";
 let presets: Preset[] = [];
 let markers: SequenceMarker[] | undefined;
@@ -304,24 +314,59 @@ function render(): void {
   }
 }
 
-async function loadProjectMedia(): Promise<void> {
-  if (!snapshot?.connected || projectLoading) return;
-  projectLoading = true;
+function clearProjectCache(): void {
+  projectCacheGeneration++;
+  projectCacheKey = undefined;
   projectId = undefined;
   projectIndex = [];
+  binStack = [];
+  expandedBins.clear();
+}
+
+async function loadProjectMedia(force = false): Promise<void> {
+  if (!snapshot?.connected) return;
+  if (projectLoading) {
+    projectRefreshPending ||= force;
+    return;
+  }
+  projectLoading = true;
+  const generation = projectCacheGeneration;
+  // Premiere's dirty event can be missed while a project is already dirty.
+  const key = !force && performance.now() - projectScannedAt < 30_000 ? projectCacheKey : undefined;
   projectError = "";
   render();
+  const log = element("project-log");
+  const entry = document.createElement("li");
+  const startedAt = performance.now();
+  const label = `#${++projectScanCount} · ${new Date().toLocaleTimeString()}`;
+  entry.textContent = `${label} · Checking project…`;
+  log.prepend(entry);
+  if (log.children.length > 30) log.lastElementChild?.remove();
   try {
-    const catalog = await invoke<ProjectMediaCatalog>("run_palette_command", { action: "list-project-media" });
-    if (snapshot?.connected) {
+    const { key: currentKey, catalog } = await invoke<ProjectCatalogReply>("run_palette_command", {
+      action: "list-project-media", value: key,
+    });
+    const elapsed = Math.round(performance.now() - startedAt);
+    entry.textContent = catalog
+      ? `${label} · Full scan · ${catalog.items.length} items · ${elapsed} ms`
+      : `${label} · Cache hit · ${elapsed} ms`;
+    if (generation === projectCacheGeneration && snapshot?.connected && catalog) {
+      if (projectId !== undefined && projectId !== catalog.projectId) clearProjectCache();
       projectId = catalog.projectId;
       projectIndex = indexProjectMedia(catalog.items);
+      projectCacheKey = currentKey;
+      projectScannedAt = performance.now();
     }
   } catch (error) {
-    projectError = String(error);
+    if (generation === projectCacheGeneration) projectError = String(error);
+    entry.textContent = `${label} · Request failed · ${String(error)}`;
   } finally {
     projectLoading = false;
     render();
+    if (projectRefreshPending) {
+      projectRefreshPending = false;
+      void loadProjectMedia(true);
+    }
   }
 }
 
@@ -471,8 +516,7 @@ function update(next: BridgeSnapshot): void {
   const wasConnected = snapshot?.connected;
   snapshot = next;
   if (!next.connected) {
-    projectId = undefined;
-    projectIndex = [];
+    clearProjectCache();
   }
   rebuildIndex();
   element("connection").textContent = next.connected ? "Premiere connected" : "Premiere offline";
@@ -484,7 +528,7 @@ function update(next: BridgeSnapshot): void {
   if (next.error) setStatus(next.error, true);
   else if (!busy) setStatus(next.connected ? "" : "Connect the Premiere panel to load your effects.");
   render();
-  if ((searchMode === "project" || searchMode === "all") && next.connected && !wasConnected) void loadProjectMedia();
+  if ((searchMode === "project" || searchMode === "all") && next.connected && !wasConnected) void loadProjectMedia(true);
 }
 
 function rebuildIndex(): void {
@@ -613,6 +657,13 @@ document.addEventListener("keydown", async (event) => {
 });
 
 element("settings-toggle").addEventListener("click", () => openSettings(!settingsOpen));
+const projectLogToggle = element<HTMLInputElement>("show-project-log");
+try { projectLogToggle.checked = localStorage.getItem("helm-show-project-log") === "true"; } catch { /* Use the default. */ }
+element("project-log").hidden = !projectLogToggle.checked;
+projectLogToggle.addEventListener("change", () => {
+  element("project-log").hidden = !projectLogToggle.checked;
+  try { localStorage.setItem("helm-show-project-log", String(projectLogToggle.checked)); } catch { /* Visibility still works for this session. */ }
+});
 element("setup-button").addEventListener("click", () => openSettings(true));
 element("back").addEventListener("click", () => openSettings(false));
 element("record-shortcut").addEventListener("click", () => {
@@ -639,7 +690,9 @@ element("refresh").addEventListener("click", async () => {
   setStatus("Refreshing Premiere effects and presets…");
   try {
     await loadPresets(true);
-    if (snapshot?.connected) await invoke("refresh_catalog");
+    if (snapshot?.connected) {
+      await Promise.all([invoke("refresh_catalog"), loadProjectMedia(true)]);
+    }
     setStatus(`Catalog refreshed · ${presets.length} presets.`);
   }
   catch (error) { setStatus(String(error), true); }
@@ -648,6 +701,14 @@ element("refresh").addEventListener("click", async () => {
 
 async function start(): Promise<void> {
   await listen<BridgeSnapshot>("bridge-changed", ({ payload }) => update(payload));
+  await listen<boolean>("project-catalog-changed", ({ payload: reset }) => {
+    if (reset) {
+      clearProjectCache();
+      render();
+    }
+    clearTimeout(projectRefreshTimer);
+    projectRefreshTimer = setTimeout(() => void loadProjectMedia(true), 300);
+  });
   await listen("palette-opened", () => {
     if (busy) return;
     input.value = "";

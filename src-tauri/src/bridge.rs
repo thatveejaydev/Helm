@@ -110,10 +110,11 @@ impl Bridge {
     }
 
     pub async fn request(&self, command: &str, payload: Value) -> Result<Value, String> {
-        let _guard = self
-            .busy
-            .try_lock()
-            .map_err(|_| "Another command is still running.".to_string())?;
+        let _guard = if command == "project-catalog" {
+            None
+        } else {
+            Some(self.busy.try_lock().map_err(|_| "Another command is still running.".to_string())?)
+        };
         let sender = self
             .sender
             .lock()
@@ -275,6 +276,11 @@ async fn connection(
                         Message::Text(text) => {
                             let message: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
                             match message["type"].as_str() {
+                                Some("project-catalog-changed") => {
+                                    if let Some(reset) = message["reset"].as_bool() {
+                                        let _ = app.emit("project-catalog-changed", reset);
+                                    }
+                                }
                                 Some("catalog") => {
                                     let effects: Vec<Effect> = serde_json::from_value(message["effects"].clone()).map_err(|e| e.to_string())?;
                                     if effects.len() > 50_000 || effects.iter().any(|effect|
