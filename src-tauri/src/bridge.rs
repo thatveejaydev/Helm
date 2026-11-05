@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -34,7 +34,6 @@ pub struct Snapshot {
     pub connected: bool,
     pub effects: Vec<Effect>,
     pub error: Option<String>,
-    pub pairing_key: String,
     pub port: u16,
     pub shortcut: String,
 }
@@ -50,6 +49,7 @@ pub struct Bridge {
     sender: Mutex<Option<mpsc::Sender<Request>>>,
     busy: tokio::sync::Mutex<()>,
     root: PathBuf,
+    pairing_key: String,
 }
 
 impl Bridge {
@@ -57,7 +57,7 @@ impl Bridge {
         std::fs::create_dir_all(&root)?;
         let key_path = root.join("pairing-key");
         let pairing_key = match std::fs::read_to_string(&key_path) {
-            Ok(key) if key.trim().len() == 32 => key.trim().to_string(),
+            Ok(key) if key.trim().len() == 32 && key.trim().bytes().all(|byte| byte.is_ascii_hexdigit()) => key.trim().to_string(),
             _ => {
                 let key = uuid::Uuid::new_v4().simple().to_string();
                 std::fs::write(&key_path, &key)?;
@@ -74,13 +74,13 @@ impl Bridge {
                 connected: false,
                 effects: vec![],
                 error: None,
-                pairing_key,
                 port: PORT,
                 shortcut,
             }),
             sender: Mutex::new(None),
             busy: tokio::sync::Mutex::new(()),
             root,
+            pairing_key,
         })
     }
 
@@ -149,6 +149,27 @@ impl Bridge {
     }
 }
 
+fn publish_session(storage: &Path, session: &[u8]) {
+    let Ok(versions) = std::fs::read_dir(storage) else { return };
+    for version in versions.flatten() {
+        if !version.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let directory = version.path().join("Developer/is.helm.palette.bridge/PluginData");
+        if !std::fs::symlink_metadata(&directory).is_ok_and(|meta| meta.is_dir()) {
+            continue;
+        }
+        let destination = directory.join("helm-session.json");
+        if std::fs::read(&destination).is_ok_and(|existing| existing == session) {
+            continue;
+        }
+        let temporary = directory.join(format!("helm-session-{}.tmp", uuid::Uuid::new_v4()));
+        if std::fs::write(&temporary, session).and_then(|()| std::fs::rename(&temporary, &destination)).is_err() {
+            let _ = std::fs::remove_file(temporary);
+        }
+    }
+}
+
 pub async fn serve(app: tauri::AppHandle, bridge: Arc<Bridge>) {
     let listener = match TcpListener::bind(("127.0.0.1", PORT)).await {
         Ok(listener) => listener,
@@ -160,6 +181,17 @@ pub async fn serve(app: tauri::AppHandle, bridge: Arc<Bridge>) {
             return;
         }
     };
+    if let Some(roaming) = std::env::var_os("APPDATA") {
+        let storage = PathBuf::from(roaming).join("Adobe/UXP/PluginsStorage/PPRO");
+        let session = json!({ "port": PORT, "token": bridge.pairing_key }).to_string();
+        tauri::async_runtime::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                publish_session(&storage, session.as_bytes());
+            }
+        });
+    }
     // Authenticate sockets concurrently so an idle, unauthenticated socket cannot block Premiere.
     while let Ok((stream, _)) = listener.accept().await {
         let app = app.clone();
@@ -195,14 +227,14 @@ async fn connection(
         .map_err(|e| e.to_string())?;
     let hello: Value = serde_json::from_str(message.to_text().map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
-    let expected = bridge.snapshot().pairing_key;
+    let expected = bridge.pairing_key.as_str();
     if hello["type"] != "hello"
         || hello["protocol"] != 1
-        || hello["key"].as_str() != Some(&expected)
+        || hello["key"].as_str() != Some(expected)
     {
         let _ = socket
             .send(Message::text(
-                json!({"type":"error", "error":"Pairing key does not match. Copy it from Helm."})
+                json!({"type":"error", "error":"Helm could not authenticate this session. Restart Helm and reload Helm Bridge."})
                     .to_string(),
             ))
             .await;

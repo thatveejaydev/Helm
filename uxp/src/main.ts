@@ -4,18 +4,17 @@ import { applyEffect, applyPreset, discoverEffects, isAudio, isVideo, selectedCl
 import { runCommand } from "./commands";
 
 const ppro = require("premierepro") as premierepro;
-const { entrypoints } = require("uxp");
-const address = "ws://localhost:48139";
-const storageKey = "helm-pairing-key";
+const { entrypoints, storage } = require("uxp");
 
 let socket: WebSocket | undefined;
 let reconnect: ReturnType<typeof setTimeout> | undefined;
-let key = "";
+let running = false;
+let generation = 0;
 let retryMs = 750;
 let catalog = new Map<string, Effect>();
 let busy = false;
 let authenticated = false;
-let statusText = "Open Helm on your desktop to pair.";
+let statusText = "Waiting for the Helm desktop app…";
 let bindPending = false;
 
 function status(message: string): void {
@@ -103,19 +102,31 @@ function errorMessage(error: unknown): string {
 }
 
 function scheduleReconnect(): void {
-  if (!key || reconnect !== undefined) return;
+  if (!running || reconnect !== undefined) return;
   reconnect = setTimeout(() => {
     reconnect = undefined;
-    connect();
+    void connect();
   }, retryMs);
   retryMs = Math.min(retryMs * 2, 8000);
 }
 
-function connect(): void {
-  if (!key || socket) return;
-  status("Connecting to Helm…");
+async function connect(): Promise<void> {
+  const attempt = generation;
+  let session: { port?: unknown; token?: unknown } | null = null;
+  try {
+    const folder = await storage.localFileSystem.getDataFolder();
+    const file = await folder.getEntry("helm-session.json");
+    session = JSON.parse(await file.read());
+  } catch { /* Helm may start after Premiere creates the data folder. */ }
+  if (!running || attempt !== generation) return;
+  if (session?.port !== 48139 || typeof session.token !== "string" || !/^[a-f0-9]{32}$/i.test(session.token)) {
+    status("Waiting for the Helm desktop app…");
+    scheduleReconnect();
+    return;
+  }
+  const { port, token } = session;
   let connection: WebSocket;
-  try { connection = new WebSocket(address); }
+  try { connection = new WebSocket(`ws://localhost:${port}`); }
   catch (error) {
     status(`Could not open the Helm bridge. ${errorMessage(error)}`);
     scheduleReconnect();
@@ -124,7 +135,9 @@ function connect(): void {
   socket = connection;
   authenticated = false;
   let rejected = false;
-  connection.onopen = () => send(connection, { type: "hello", protocol: 1, key });
+  connection.onopen = () => {
+    if (socket === connection) send(connection, { type: "hello", protocol: 1, key: token });
+  };
   connection.onmessage = ({ data }) => {
     if (socket !== connection || typeof data !== "string") return;
     let message: Record<string, unknown>;
@@ -136,7 +149,6 @@ function connect(): void {
     } else if (message.type === "welcome" && message.protocol === 1 && !authenticated) {
       authenticated = true;
       retryMs = 750;
-      try { localStorage.setItem(storageKey, key); } catch { /* Pair again if storage is unavailable. */ }
       void publishCatalog(connection).catch((error) => {
         const detail = `Could not read Premiere effects. ${errorMessage(error)}`;
         status(detail);
@@ -153,14 +165,14 @@ function connect(): void {
     if (socket !== connection) return;
     socket = undefined;
     authenticated = false;
-    if (!rejected) {
-      status("Waiting for the Helm desktop app…");
-      scheduleReconnect();
-    }
+    if (!rejected) status("Waiting for the Helm desktop app…");
+    scheduleReconnect();
   };
 }
 
 function stop(): void {
+  running = false;
+  generation++;
   clearTimeout(reconnect);
   reconnect = undefined;
   const connection = socket;
@@ -170,19 +182,9 @@ function stop(): void {
 }
 
 function bindPanel(): void {
-  const input = document.getElementById("key") as HTMLInputElement | null;
-  if (!input || bindPending) return;
+  if (!document.getElementById("status") || bindPending) return;
   bindPending = true;
-  input.value = key;
   status(statusText);
-  document.getElementById("connect")?.addEventListener("click", () => {
-    const candidate = input.value.trim().toLowerCase();
-    if (!/^[a-f0-9]{32}$/.test(candidate)) { status("Paste the 32-character pairing key from Helm settings."); return; }
-    stop();
-    key = candidate;
-    retryMs = 750;
-    connect();
-  });
   document.getElementById("refresh")?.addEventListener("click", () => {
     if (!socket || !authenticated) { status("Connect the Helm desktop app first."); return; }
     if (busy) return;
@@ -195,9 +197,11 @@ function bindPanel(): void {
 }
 
 function start(): void {
-  try { key ||= localStorage.getItem(storageKey) || ""; } catch { /* The panel can still pair for this session. */ }
   bindPanel();
-  connect();
+  if (running) return;
+  running = true;
+  retryMs = 750;
+  void connect();
 }
 
 entrypoints.setup({

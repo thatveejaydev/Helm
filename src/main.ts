@@ -19,9 +19,8 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
     <div id="empty" class="empty" hidden><span class="empty-symbol">⌕</span><h2 id="empty-title"></h2><p id="empty-message"></p><button id="setup-button" class="secondary" hidden>Connect to Premiere</button></div>
   </section>
   <section id="settings" hidden>
-    <div class="section-heading"><span class="eyebrow">CONNECTION</span><h1>Meet your new shortcut.</h1><p>Connect Helm to Premiere once, then keep your hands on the keyboard.</p></div>
-    <ol class="setup-steps"><li><span>1</span><div>Load the Premiere plugin<small>In UXP Developer Tools, add <strong>uxp/dist/manifest.json</strong> and click Load.</small></div></li><li><span>2</span><div>Pair the Helm panel<small>Open Window → UXP Plugins → Helm Bridge. Paste this key and select Connect.</small></div></li></ol>
-    <div class="key-row"><code id="pairing-key"></code><button id="copy-key" class="secondary">Copy key</button></div>
+    <div class="section-heading"><span class="eyebrow">CONNECTION</span><h1>Meet your new shortcut.</h1><p>Helm connects automatically when Helm Bridge is loaded in Premiere.</p></div>
+    <ol class="setup-steps"><li><span>1</span><div>Load the Premiere plugin<small>In UXP Developer Tools, add <strong>uxp/dist/manifest.json</strong> and click Load.</small></div></li></ol>
     <div class="shortcut-row"><span>Open while editing</span><div class="shortcut-controls"><button id="record-shortcut" class="shortcut-button" type="button" aria-label="Change shortcut" title="Click to record a new shortcut"><kbd id="shortcut">Ctrl + Alt + Space</kbd></button><button id="reset-shortcut" class="shortcut-reset" type="button" aria-label="Reset to default shortcut" title="Reset to default (Ctrl + Alt + Space)">↺</button></div></div>
     <div class="settings-actions"><button id="back" class="secondary">Back to search</button><button id="refresh" class="primary">Refresh effects and presets</button></div>
   </section>
@@ -401,7 +400,6 @@ function update(next: BridgeSnapshot): void {
   rebuildIndex();
   element("connection").textContent = next.connected ? "Premiere connected" : "Premiere offline";
   element("connection").classList.toggle("online", next.connected);
-  element("pairing-key").textContent = next.pairingKey;
   if (!recordingShortcut) {
     element("shortcut").textContent = next.shortcut.replaceAll("+", " + ");
   }
@@ -510,13 +508,6 @@ document.addEventListener("keydown", async (event) => {
 element("settings-toggle").addEventListener("click", () => openSettings(!settingsOpen));
 element("setup-button").addEventListener("click", () => openSettings(true));
 element("back").addEventListener("click", () => openSettings(false));
-element("copy-key").addEventListener("click", async () => {
-  try {
-    await navigator.clipboard.writeText(snapshot?.pairingKey || "");
-    element("copy-key").textContent = "Copied";
-    setTimeout(() => { element("copy-key").textContent = "Copy key"; }, 1500);
-  } catch { setStatus("Select and copy the pairing key manually.", true); }
-});
 element("record-shortcut").addEventListener("click", () => {
   if (recordingShortcut) {
     stopRecordingShortcut();

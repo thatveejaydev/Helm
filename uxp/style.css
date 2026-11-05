@@ -2,7 +2,5 @@ body { margin: 0; padding: 12px; color: #dedce5; background-color: #222226; font
 section { display: flex; flex-direction: column; }
 h2 { font-size: 16px; margin: 0 0 8px; }
 p { font-size: 12px; color: #b1a7c5; margin: 0 0 12px; }
-label { font-size: 11px; margin: 0 0 4px; }
-input { height: 27px; margin: 0; padding: 4px 7px; color: #eee; background-color: #18181d; border: 1px solid #555060; border-radius: 4px; }
 .actions { display: flex; flex-direction: row; margin-top: 8px; }
 button { padding: 5px 8px; margin: 0 6px 0 0; color: #eee; background-color: #41394d; border: 1px solid #625772; border-radius: 4px; font-size: 11px; }

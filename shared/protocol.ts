@@ -40,7 +40,6 @@ export interface BridgeSnapshot {
   connected: boolean;
   effects: Effect[];
   error: string | null;
-  pairingKey: string;
   port: number;
   shortcut: string;
 }

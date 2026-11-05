@@ -8,7 +8,7 @@ Run `src-tauri/target/release/helm.exe` from the workspace, or use the installer
 
 1. Enable Developer Mode in **Premiere → Edit → Preferences → Plugins**, then restart Premiere if prompted. Open **Adobe UXP Developer Tools** and enable its Developer Mode if prompted.
 2. In UXP Developer Tools, choose **Add Plugin**, select `uxp\dist\manifest.json` from this folder, then choose **Load**. Open **Window → UXP Plugins → Helm Bridge** in Premiere.
-3. Open the gear in Helm to copy the pairing key or customize your shortcut. Paste the key into the Helm Bridge panel and click **Connect**. The desktop palette will show **Premiere connected** and load the available effects.
+3. With Helm running and Helm Bridge loaded, wait for the desktop palette to show **Premiere connected**. Helm and the bridge connect automatically. Open the gear in Helm to customize your shortcut.
 4. Select a video clip, audio clip, or adjustment layer on the timeline. With Premiere active, invoke the shortcut, search for an effect, and press **Enter**. Premiere groups all compatible clips into one Undo step. Keep the bridge loaded in UXP Developer Tools during development.
 
 The tray menu can reopen or quit Helm. If the shortcut is taken by another program, Helm shows the registration error and the tray menu is still available. You can click the shortcut in Settings to record a new one anytime, or click ↺ to reset back to default.
