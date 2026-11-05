@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>Helm Project Debug Log</title>
+  </head>
+  <body class="project-log-window">
+    <main id="project-log">
+      <h1>Helm Project Debug Log</h1>
+      <h2>Browsing and typing</h2>
+      <p>Note these totals before and after a test to see how much work Helm did. Counts start over when Helm restarts.</p>
+      <p>Bin-tree builds <strong id="bin-tree-build-count">0</strong> · Results redraws <strong id="result-render-count">0</strong></p>
+      <h2>Project catalog</h2>
+      <p>Measures how long Helm takes to get your project’s list of clips, sequences, and bins. Compare Full scan with Cache hit to see how much time Helm saves by reusing that list.</p>
+      <ol id="catalog-log" aria-label="Recent project catalog requests"></ol>
+      <h2>Item lookup</h2>
+      <p>Measures how long Helm takes to find the selected item before opening or inserting it. Compare Fresh lookup with Lookup hit for the same item and action to see how much time Helm saves by checking the last known bin first.</p>
+      <ol id="lookup-log" aria-label="Recent project item lookups"></ol>
+      <h2>Preset library</h2>
+      <p>Library load requests <strong id="preset-load-count">0</strong>. This count should stay steady when you reopen the palette. Startup, library changes, and manual refreshes can add entries.</p>
+      <ol id="presets-log" aria-label="Recent preset library load requests"></ol>
+    </main>
+    <script type="module" src="/src/project-log.ts"></script>
+  </body>
+</html>

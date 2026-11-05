@@ -1,5 +1,5 @@
 import type { Action, AudioTrack, ClipProjectItem, Component, FolderItem, Project, ProjectItem, Sequence, VideoTrack, premierepro } from "@adobe/premierepro";
-import type { ProjectCatalogKey, ProjectCatalogReply, ProjectMedia, ProjectMediaCatalog } from "../../shared/protocol";
+import type { ProjectCatalogKey, ProjectCatalogReply, ProjectItemLookup, ProjectMedia, ProjectMediaCatalog } from "../../shared/protocol";
 import { discoverEffects, isAudio, isVideo, selectedClips } from "./effects";
 
 function commit(project: Project, label: string, createActions: () => Action[]): void {
@@ -24,15 +24,46 @@ async function* projectClips(
   sequences: ReadonlyMap<string, Sequence>,
   bins: string[] = [],
   binIds: string[] = [],
-): AsyncGenerator<{ item: ProjectItem; bins: string[]; binIds: string[] }> {
+): AsyncGenerator<{ item: ProjectItem; bins: string[]; binIds: string[]; parent: FolderItem }> {
   for (const item of await folder.getItems()) {
     if (item.type === ppro.ProjectItem.TYPE_BIN) {
-      yield { item, bins, binIds };
+      yield { item, bins, binIds, parent: folder };
       yield* projectClips(ppro, ppro.FolderItem.cast(item), sequences, [...bins, item.name], [...binIds, item.getId()]);
     } else if (item.type === ppro.ProjectItem.TYPE_CLIP || sequences.has(item.getId())) {
-      yield { item, bins, binIds };
+      yield { item, bins, binIds, parent: folder };
     }
   }
+}
+
+const projectLookups = new WeakMap<premierepro, { projectId: string; parents: Map<string, FolderItem> }>();
+
+export function clearProjectLookup(ppro: premierepro): void {
+  projectLookups.delete(ppro);
+}
+
+async function findProjectItem(ppro: premierepro, project: Project, id: string) {
+  const start = performance.now();
+  const sequences = await projectSequences(project);
+  const lookup = projectLookups.get(ppro);
+  const parents = lookup?.projectId === project.guid.toString() ? lookup.parents : undefined;
+  const result = (item: ProjectItem, source: ProjectItemLookup["source"]) => ({
+    item, sequences, lookup: { source, elapsedMs: Math.round(performance.now() - start) },
+  });
+  const parent = parents?.get(id);
+  if (parent) {
+    try {
+      // Resolve a live handle in its last known bin, so moved or deleted items fall through.
+      const item = (await parent.getItems()).find((child) => child.type !== ppro.ProjectItem.TYPE_BIN && child.getId() === id);
+      if (item) return result(item, "cache");
+    } catch { /* Premiere may have invalidated the bin handle. */ }
+    parents?.delete(id);
+  }
+  for await (const { item, parent } of projectClips(ppro, await project.getRootItem(), sequences)) {
+    if (item.type === ppro.ProjectItem.TYPE_BIN || item.getId() !== id) continue;
+    parents?.set(id, parent);
+    return result(item, "scan");
+  }
+  throw new Error("This item is no longer in the project. Search the project again.");
 }
 
 async function projectSequences(project: Project): Promise<Map<string, Sequence>> {
@@ -67,18 +98,19 @@ async function checkNesting(
   }
 }
 
-async function listProjectMedia(ppro: premierepro): Promise<ProjectMediaCatalog> {
+async function listProjectMedia(ppro: premierepro, parents?: Map<string, FolderItem>): Promise<ProjectMediaCatalog> {
   const project = await ppro.Project.getActiveProject();
   if (!project) throw new Error("Open a Premiere project first.");
   const sequences = await projectSequences(project);
   const active = await project.getActiveSequence();
   const items: ProjectMediaCatalog["items"] = [];
-  for await (const { item, bins, binIds } of projectClips(ppro, await project.getRootItem(), sequences)) {
+  for await (const { item, bins, binIds, parent } of projectClips(ppro, await project.getRootItem(), sequences)) {
     const id = item.getId();
     if (item.type === ppro.ProjectItem.TYPE_BIN) {
       items.push({ id, name: item.name, bins, binIds, mediaType: "bin" });
       continue;
     }
+    parents?.set(id, parent);
     const sequence = sequences.get(id);
     if (sequence) {
       if (sequence.guid.toString() !== active?.guid.toString()) {
@@ -115,10 +147,12 @@ export async function readProjectCatalog(
   const matches = (other?: Partial<ProjectCatalogKey> | null) =>
     key.projectId === other?.projectId && key.sequenceId === other.sequenceId && key.revision === other.revision;
   if (matches(known as Partial<ProjectCatalogKey> | null)) return { key };
-  const catalog = await listProjectMedia(ppro);
+  const parents = new Map<string, FolderItem>();
+  const catalog = await listProjectMedia(ppro, parents);
   if (catalog.projectId !== key.projectId || !matches(await getKey())) {
     throw new Error("The Premiere project changed during the scan.");
   }
+  projectLookups.set(ppro, { projectId: key.projectId, parents });
   return { key, catalog };
 }
 
@@ -128,26 +162,22 @@ async function openProjectSource(ppro: premierepro, value: unknown) {
   if (!project || selection?.projectId !== project.guid.toString() || typeof selection.id !== "string") {
     throw new Error("The active project changed. Search the project again.");
   }
-  const sequences = await projectSequences(project);
-  for await (const { item } of projectClips(ppro, await project.getRootItem(), sequences)) {
-    if (item.type === ppro.ProjectItem.TYPE_BIN || item.getId() !== selection.id) continue;
-    const sequence = sequences.get(selection.id);
-    if (!sequence && await ppro.ClipProjectItem.cast(item).isOffline()) {
-      throw new Error("Relink this clip in Premiere before opening it.");
-    }
-    if ((await ppro.Project.getActiveProject())?.guid.toString() !== selection.projectId) {
-      throw new Error("The active project changed. Search the project again.");
-    }
-    if (sequence) {
-      if (!await project.openSequence(sequence)) throw new Error(`Premiere could not open ${item.name} in the timeline.`);
-      return { message: `Opened ${item.name} in the timeline.` };
-    }
-    if (!await ppro.SourceMonitor.openProjectItem(item)) {
-      throw new Error(`${item.name} cannot be viewed in the Source Monitor.`);
-    }
-    return { message: `Opened ${item.name} in the Source Monitor.` };
+  const { item, sequences, lookup } = await findProjectItem(ppro, project, selection.id);
+  const sequence = sequences.get(selection.id);
+  if (!sequence && await ppro.ClipProjectItem.cast(item).isOffline()) {
+    throw new Error("Relink this clip in Premiere before opening it.");
   }
-  throw new Error("This item is no longer in the project. Search the project again.");
+  if ((await ppro.Project.getActiveProject())?.guid.toString() !== selection.projectId) {
+    throw new Error("The active project changed. Search the project again.");
+  }
+  if (sequence) {
+    if (!await project.openSequence(sequence)) throw new Error(`Premiere could not open ${item.name} in the timeline.`);
+    return { lookup, message: `Opened ${item.name} in the timeline.` };
+  }
+  if (!await ppro.SourceMonitor.openProjectItem(item)) {
+    throw new Error(`${item.name} cannot be viewed in the Source Monitor.`);
+  }
+  return { lookup, message: `Opened ${item.name} in the Source Monitor.` };
 }
 
 async function availableTrack(
@@ -188,51 +218,47 @@ async function insertProjectMedia(ppro: premierepro, value: unknown) {
   if (selection?.projectId !== project.guid.toString() || typeof selection.id !== "string") {
     throw new Error("The active project changed. Switch to Project search again.");
   }
-  const sequences = await projectSequences(project);
-  for await (const { item } of projectClips(ppro, await project.getRootItem(), sequences)) {
-    if (item.type === ppro.ProjectItem.TYPE_BIN || item.getId() !== selection.id) continue;
-    const sourceSequence = sequences.get(selection.id);
-    const clip = sourceSequence ? undefined : ppro.ClipProjectItem.cast(item);
-    if (sourceSequence) await checkNesting(ppro, sourceSequence, sequence, sequences);
-    if (clip && await clip.isOffline()) throw new Error("Relink this clip in Premiere before inserting it.");
-    const position = await sequence.getPlayerPosition();
-    const start = BigInt(position.ticks);
-    const preferred = (track: unknown) => typeof track === "number" && Number.isSafeInteger(track) && track > 0 ? track - 1 : undefined;
-    const range = async (type: Parameters<ClipProjectItem["getInPoint"]>[0]) => {
-      if (!clip) return 0n;
-      try {
-        const [inPoint, outPoint] = await Promise.all([clip.getInPoint(type), clip.getOutPoint(type)]);
-        return BigInt(outPoint.ticks) - BigInt(inPoint.ticks);
-      } catch {
-        return 0n;
-      }
-    };
-    const [videoDuration, audioDuration] = await Promise.all([
-      range(ppro.Constants.MediaType.VIDEO), range(ppro.Constants.MediaType.AUDIO),
-    ]);
-    let fallbackDuration = 0n;
-    if (sourceSequence) {
-      fallbackDuration = BigInt((await sourceSequence.getEndTime()).ticks);
-      if (fallbackDuration <= 0n) throw new Error("The source sequence is empty.");
-    } else if (clip && videoDuration <= 0n && audioDuration <= 0n) {
-      try { fallbackDuration = BigInt((await clip.getMedia()).getDuration().ticks); } catch { /* Require empty tracks when duration is unknown. */ }
+  const { item, sequences, lookup } = await findProjectItem(ppro, project, selection.id);
+  const sourceSequence = sequences.get(selection.id);
+  const clip = sourceSequence ? undefined : ppro.ClipProjectItem.cast(item);
+  if (sourceSequence) await checkNesting(ppro, sourceSequence, sequence, sequences);
+  if (clip && await clip.isOffline()) throw new Error("Relink this clip in Premiere before inserting it.");
+  const position = await sequence.getPlayerPosition();
+  const start = BigInt(position.ticks);
+  const preferred = (track: unknown) => typeof track === "number" && Number.isSafeInteger(track) && track > 0 ? track - 1 : undefined;
+  const range = async (type: Parameters<ClipProjectItem["getInPoint"]>[0]) => {
+    if (!clip) return 0n;
+    try {
+      const [inPoint, outPoint] = await Promise.all([clip.getInPoint(type), clip.getOutPoint(type)]);
+      return BigInt(outPoint.ticks) - BigInt(inPoint.ticks);
+    } catch {
+      return 0n;
     }
-    const [videoTrack, audioTrack] = await Promise.all([
-      videoDuration > 0n || audioDuration <= 0n
-        ? availableTrack(ppro, sequence, "video", preferred(selection.videoTrack), start, videoDuration || fallbackDuration) : 0,
-      audioDuration > 0n || videoDuration <= 0n
-        ? availableTrack(ppro, sequence, "audio", preferred(selection.audioTrack), start, audioDuration || fallbackDuration) : 0,
-    ]);
-    const active = await activeTimeline(ppro);
-    if (active.project.guid.toString() !== selection.projectId || active.sequence.guid.toString() !== sequence.guid.toString()) {
-      throw new Error("The active timeline changed. Try again.");
-    }
-    const editor = ppro.SequenceEditor.getEditor(sequence);
-    // Insert remains non-destructive if Premiere changes the timeline after the occupancy reads.
-    commit(project, `Insert ${item.name}`, () => [editor.createInsertProjectItemAction(item, position, videoTrack, audioTrack, true)]);
-    return { message: `Inserted ${item.name} at the playhead.` };
+  };
+  const [videoDuration, audioDuration] = await Promise.all([
+    range(ppro.Constants.MediaType.VIDEO), range(ppro.Constants.MediaType.AUDIO),
+  ]);
+  let fallbackDuration = 0n;
+  if (sourceSequence) {
+    fallbackDuration = BigInt((await sourceSequence.getEndTime()).ticks);
+    if (fallbackDuration <= 0n) throw new Error("The source sequence is empty.");
+  } else if (clip && videoDuration <= 0n && audioDuration <= 0n) {
+    try { fallbackDuration = BigInt((await clip.getMedia()).getDuration().ticks); } catch { /* Require empty tracks when duration is unknown. */ }
   }
-  throw new Error("This clip is no longer in the project. Switch to Project search again.");
+  const [videoTrack, audioTrack] = await Promise.all([
+    videoDuration > 0n || audioDuration <= 0n
+      ? availableTrack(ppro, sequence, "video", preferred(selection.videoTrack), start, videoDuration || fallbackDuration) : 0,
+    audioDuration > 0n || videoDuration <= 0n
+      ? availableTrack(ppro, sequence, "audio", preferred(selection.audioTrack), start, audioDuration || fallbackDuration) : 0,
+  ]);
+  const active = await activeTimeline(ppro);
+  if (active.project.guid.toString() !== selection.projectId || active.sequence.guid.toString() !== sequence.guid.toString()) {
+    throw new Error("The active timeline changed. Try again.");
+  }
+  const editor = ppro.SequenceEditor.getEditor(sequence);
+  // Insert remains non-destructive if Premiere changes the timeline after the occupancy reads.
+  commit(project, `Insert ${item.name}`, () => [editor.createInsertProjectItemAction(item, position, videoTrack, audioTrack, true)]);
+  return { lookup, message: `Inserted ${item.name} at the playhead.` };
 }
 
 async function editClips(ppro: premierepro, command: string, value: unknown) {

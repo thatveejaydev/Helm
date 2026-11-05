@@ -78,3 +78,8 @@ export interface ProjectCatalogReply {
   key: ProjectCatalogKey;
   catalog?: ProjectMediaCatalog;
 }
+
+export interface ProjectItemLookup {
+  source: "cache" | "scan";
+  elapsedMs: number;
+}

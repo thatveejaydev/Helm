@@ -1,7 +1,7 @@
 import type { premierepro } from "@adobe/premierepro";
 import type { Effect, PresetFilter } from "../../shared/protocol";
 import { applyEffect, applyPreset, discoverEffects, isAudio, isVideo, selectedClips } from "./effects";
-import { readProjectCatalog, runCommand } from "./commands";
+import { clearProjectLookup, readProjectCatalog, runCommand } from "./commands";
 
 const ppro = require("premierepro") as premierepro;
 const { entrypoints, storage } = require("uxp");
@@ -21,6 +21,7 @@ let projectScanRunning = false;
 
 function notifyProjectChange(reset: boolean): void {
   projectRevision++;
+  if (reset) clearProjectLookup(ppro);
   if (socket && authenticated) send(socket, { type: "project-catalog-changed", reset });
 }
 
@@ -204,6 +205,8 @@ function stop(): void {
     ppro.EventManager.removeGlobalEventListener(ppro.ProjectEvent.EVENT_DIRTY, projectDirty);
   }
   running = false;
+  projectRevision++;
+  clearProjectLookup(ppro);
   generation++;
   clearTimeout(reconnect);
   reconnect = undefined;

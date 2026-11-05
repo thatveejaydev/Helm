@@ -25,6 +25,23 @@
       "visible": true,
       "center": true,
       "backgroundColor": "#151719"
+    }, {
+      "label": "project-log",
+      "title": "Helm Project Debug Log",
+      "url": "project-log.html",
+      "width": 400,
+      "height": 430,
+      "visible": false,
+      "focus": false,
+      "focusable": false,
+      "decorations": false,
+      "closable": false,
+      "minimizable": false,
+      "maximizable": false,
+      "resizable": false,
+      "alwaysOnTop": true,
+      "skipTaskbar": true,
+      "backgroundColor": "#151719"
     }],
     "security": {
       "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data:; connect-src ipc: http://ipc.localhost",

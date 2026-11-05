@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-import type { ApplyResult, BridgeSnapshot, CatalogItem, Preset, ProjectMedia, ProjectCatalogKey, ProjectCatalogReply, SequenceMarker } from "../shared/protocol";
+import { emitTo, listen } from "@tauri-apps/api/event";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import type { ApplyResult, BridgeSnapshot, CatalogItem, Preset, ProjectMedia, ProjectCatalogKey, ProjectCatalogReply, ProjectItemLookup, SequenceMarker } from "../shared/protocol";
 import { indexEffects, indexProjectMedia, mergeSearchResults, normalize, rankEffects, rankProjectMedia, score, type SearchEntry } from "./search";
 import { captureShortcut } from "./shortcut";
 import "./style.css";
@@ -24,8 +25,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
     <div class="shortcut-row"><span>Open while editing</span><div class="shortcut-controls"><button id="record-shortcut" class="shortcut-button" type="button" aria-label="Change shortcut" title="Click to record a new shortcut"><kbd id="shortcut">Ctrl + Alt + Space</kbd></button><button id="reset-shortcut" class="shortcut-reset" type="button" aria-label="Reset to default shortcut" title="Reset to default (Ctrl + Alt + Space)">↺</button></div></div>
     <div class="settings-actions"><button id="back" class="secondary">Back to search</button><button id="refresh" class="primary">Refresh catalogs</button></div>
     <div class="project-debug">
-      <label><input id="show-project-log" type="checkbox" aria-controls="project-log" /> Show Project scan log</label>
-      <ol id="project-log" aria-label="Recent Project scans" hidden></ol>
+      <label><input id="show-project-log" type="checkbox" /> Show Project debug log window</label>
     </div>
   </section>
   <footer id="palette-footer" data-tauri-drag-region hidden>
@@ -173,16 +173,23 @@ function browsingProjectTree(): boolean {
   return searchMode === "project" && !input.value.trim();
 }
 
-function projectTree(root: ProjectMedia | undefined) {
-  const children = new Map<string | undefined, ReturnType<typeof rankProjectMedia>>();
+const projectChildren = new Map<string | undefined, ReturnType<typeof rankProjectMedia>>();
+let inputRenderFrame: number | undefined;
+
+function rebuildProjectTree(): void {
+  projectPerformance.binTreeBuilds++;
+  projectChildren.clear();
   for (const entry of rankProjectMedia(projectIndex, "", projectIndex.length)) {
     const parent = entry.item.binIds?.at(-1);
-    const siblings = children.get(parent) ?? [];
+    const siblings = projectChildren.get(parent) ?? [];
     siblings.push(entry);
-    children.set(parent, siblings);
+    projectChildren.set(parent, siblings);
   }
+}
+
+function projectTree(root: ProjectMedia | undefined) {
   function branch(parent: string | undefined): ReturnType<typeof rankProjectMedia> {
-    return (children.get(parent) ?? []).flatMap((entry) => {
+    return (projectChildren.get(parent) ?? []).flatMap((entry) => {
       const { item } = entry;
       if (item.mediaType !== "bin") return parent === undefined ? [] : [entry];
       return expandedBins.has(item.id) ? [entry, ...branch(item.id)] : [entry];
@@ -192,12 +199,17 @@ function projectTree(root: ProjectMedia | undefined) {
 }
 
 function render(): void {
+  if (inputRenderFrame !== undefined) {
+    cancelAnimationFrame(inputRenderFrame);
+    inputRenderFrame = undefined;
+  }
+  projectPerformance.resultRenders++;
+  scheduleProjectPerformanceUpdate();
   const query = input.value;
   const currentProject = projectId;
   const bin = binStack.at(-1);
   const hasQuery = Boolean(query.trim());
   const tree = browsingProjectTree();
-  const binsWithChildren = tree ? new Set(projectIndex.map(({ item }) => item.binIds?.at(-1))) : undefined;
   updatePaletteSize();
   element("insert-hint").hidden = searchMode !== "project";
   element("insert-hint").textContent = bin
@@ -212,7 +224,7 @@ function render(): void {
     return;
   }
   const limit = 60;
-  const projectEntries = bin ? projectIndex.filter(({ item }) => item.binIds?.includes(bin.id)) : projectIndex;
+  const projectEntries = !tree && bin ? projectIndex.filter(({ item }) => item.binIds?.includes(bin.id)) : projectIndex;
   const projectResults = (searchMode === "all" || searchMode === "project") && currentProject !== undefined
     ? (tree ? projectTree(bin) : rankProjectMedia(projectEntries, projectQuery(query).search, limit))
       .map(({ item, rank }) => ({ item: { ...item, kind: "project" as const, projectId: currentProject }, rank })) : [];
@@ -235,66 +247,31 @@ function render(): void {
     visible = [...effectResults.map(({ item }) => item), ...projectResults.map(({ item }) => item), ...commandResults];
   }
   selected = Math.min(selected, Math.max(0, visible.length - 1));
-  results.replaceChildren();
+  const previousRows = Array.from(results.children) as HTMLButtonElement[];
+  const reusableRows = new Map(previousRows.map((row) => [row.dataset.resultKey, row]));
+  const rows: HTMLButtonElement[] = [];
   for (const [position, effect] of visible.entries()) {
-    const row = document.createElement("button");
-    row.className = `effect-row${position === selected ? " selected" : ""}`;
+    const treeState = tree && effect.kind === "project" ? [
+      binStack.length, projectChildren.has(effect.id), expandedBins.has(effect.id),
+    ] : null;
+    const details = effect.kind === "project" ? [effect.projectId, effect.mediaType, effect.bins, effect.binIds?.length] :
+      effect.kind === "preset" ? effect.folders : effect.kind === "command" ? [effect.description, effect.value] : null;
+    const key = JSON.stringify([effect.kind, effect.id, effect.name, details, treeState]);
+    const row = reusableRows.get(key) ?? createResultRow(effect, tree);
+    reusableRows.delete(key);
+    row.dataset.resultKey = key;
     row.id = `effect-${position}`;
-    row.role = "option";
+    row.classList.toggle("selected", position === selected);
     row.setAttribute("aria-selected", String(position === selected));
-    const icon = document.createElement("span");
-    icon.className = `effect-icon ${effect.kind}`;
-    icon.textContent = { video: "ƒx", audio: "♫", preset: "◇", command: "⌘", project: "▤" }[effect.kind];
-    if (effect.kind === "project") {
-      const mediaType = effect.mediaType ?? "other";
-      icon.classList.add(`media-${mediaType}`);
-      icon.textContent = { video: "▶", audio: "♫", image: "▧", generated: "◈", sequence: "▣", bin: "▱", other: "▤" }[mediaType];
-      icon.title = { video: "Video", audio: "Audio", image: "Image", generated: "Generated media", sequence: "Sequence", bin: "Bin", other: "Project media" }[mediaType];
-    }
-    const name = document.createElement("span");
-    name.className = "effect-name";
-    name.textContent = effect.name;
-    const type = document.createElement("span");
-    type.className = "effect-kind";
-    if (effect.kind === "preset") {
-      type.textContent = effect.folders.slice(-2).join(" › ");
-      type.title = `Preset · ${effect.folders.join(" › ")}`;
-      row.title = `${effect.name} · ${type.title}`;
-    } else if (effect.kind === "project") {
-      type.textContent = effect.bins.join(" › ") || "Project root";
-      if (effect.mediaType === "sequence") type.textContent = `Sequence · ${type.textContent}`;
-      if (effect.mediaType === "bin") type.textContent = `Bin · ${type.textContent}`;
-      row.title = `${type.textContent} › ${effect.name}`;
-    } else if (effect.kind === "command") {
-      type.textContent = effect.description;
-    } else {
-      type.textContent = effect.kind === "video" ? "Video effect" : "Audio effect";
-    }
-    const enter = document.createElement("span");
-    enter.className = "row-enter";
-    enter.textContent = effect.kind === "project" && effect.mediaType === "bin" ? "" : "↵";
-    row.append(icon, name, type, enter);
-    if (tree && effect.kind === "project") {
-      row.classList.add("project-tree-row");
-      const depth = Math.max(0, (effect.binIds?.length ?? 0) - binStack.length);
-      row.style.setProperty("--bin-depth", String(depth));
-      if (effect.mediaType === "bin") {
-        icon.textContent = "";
-        if (binsWithChildren?.has(effect.id)) {
-          const open = expandedBins.has(effect.id);
-          enter.classList.add("bin-chevron");
-          enter.classList.toggle("expanded", open);
-          enter.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="m6 4 4 4-4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-          enter.setAttribute("aria-hidden", "true");
-          row.setAttribute("aria-label", `${effect.name}, ${open ? "expanded" : "collapsed"} bin`);
-        } else {
-          row.setAttribute("aria-label", `${effect.name}, empty bin`);
-        }
-      }
-    }
-    row.addEventListener("pointermove", () => select(position));
-    row.addEventListener("click", () => void apply(effect));
-    results.append(row);
+    rows.push(row);
+  }
+  const retained = new Set(rows);
+  for (const row of previousRows) {
+    if (!retained.has(row)) row.remove();
+  }
+  for (const [position, row] of rows.entries()) {
+    const current = results.children[position] ?? null;
+    if (current !== row) results.insertBefore(row, current);
   }
   input.setAttribute("aria-activedescendant", visible.length ? `effect-${selected}` : "");
   element("empty").hidden = visible.length > 0;
@@ -314,11 +291,120 @@ function render(): void {
   }
 }
 
+function createResultRow(effect: PaletteItem, tree: boolean): HTMLButtonElement {
+  const row = document.createElement("button");
+  row.className = "effect-row";
+  row.role = "option";
+  const icon = document.createElement("span");
+  icon.className = `effect-icon ${effect.kind}`;
+  icon.textContent = { video: "ƒx", audio: "♫", preset: "◇", command: "⌘", project: "▤" }[effect.kind];
+  if (effect.kind === "project") {
+    const mediaType = effect.mediaType ?? "other";
+    icon.classList.add(`media-${mediaType}`);
+    icon.textContent = { video: "▶", audio: "♫", image: "▧", generated: "◈", sequence: "▣", bin: "▱", other: "▤" }[mediaType];
+    icon.title = { video: "Video", audio: "Audio", image: "Image", generated: "Generated media", sequence: "Sequence", bin: "Bin", other: "Project media" }[mediaType];
+  }
+  const name = document.createElement("span");
+  name.className = "effect-name";
+  name.textContent = effect.name;
+  const type = document.createElement("span");
+  type.className = "effect-kind";
+  if (effect.kind === "preset") {
+    type.textContent = effect.folders.slice(-2).join(" › ");
+    type.title = `Preset · ${effect.folders.join(" › ")}`;
+    row.title = `${effect.name} · ${type.title}`;
+  } else if (effect.kind === "project") {
+    type.textContent = effect.bins.join(" › ") || "Project root";
+    if (effect.mediaType === "sequence") type.textContent = `Sequence · ${type.textContent}`;
+    if (effect.mediaType === "bin") type.textContent = `Bin · ${type.textContent}`;
+    row.title = `${type.textContent} › ${effect.name}`;
+  } else if (effect.kind === "command") {
+    type.textContent = effect.description;
+  } else {
+    type.textContent = effect.kind === "video" ? "Video effect" : "Audio effect";
+  }
+  const enter = document.createElement("span");
+  enter.className = "row-enter";
+  enter.textContent = effect.kind === "project" && effect.mediaType === "bin" ? "" : "↵";
+  row.append(icon, name, type, enter);
+  if (tree && effect.kind === "project") {
+    row.classList.add("project-tree-row");
+    const depth = Math.max(0, (effect.binIds?.length ?? 0) - binStack.length);
+    row.style.setProperty("--bin-depth", String(depth));
+    if (effect.mediaType === "bin") {
+      icon.textContent = "";
+      if (projectChildren.has(effect.id)) {
+        const open = expandedBins.has(effect.id);
+        enter.classList.add("bin-chevron");
+        enter.classList.toggle("expanded", open);
+        enter.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="m6 4 4 4-4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+        enter.setAttribute("aria-hidden", "true");
+        row.setAttribute("aria-label", `${effect.name}, ${open ? "expanded" : "collapsed"} bin`);
+      } else {
+        row.setAttribute("aria-label", `${effect.name}, empty bin`);
+      }
+    }
+  }
+  row.addEventListener("pointermove", () => {
+    if (inputRenderFrame === undefined) select(Number(row.id.slice("effect-".length)));
+  });
+  row.addEventListener("click", () => {
+    if (inputRenderFrame !== undefined) render();
+    if (row.parentElement === results) {
+      const current = visible[Number(row.id.slice("effect-".length))];
+      if (current) void apply(current);
+    }
+  });
+  return row;
+}
+
+const projectLog = { catalog: [] as { message: string }[], lookup: [] as { message: string }[], presets: [] as { message: string }[] };
+let presetLoadCount = 0;
+const projectPerformance = { binTreeBuilds: 0, resultRenders: 0 };
+let projectPerformanceTimer: ReturnType<typeof setTimeout> | undefined;
+
+function publishProjectPerformance(): void {
+  if (!projectLogToggle.checked) return;
+  void emitTo("project-log", "project-performance-updated", projectPerformance)
+    .catch((error) => setStatus(String(error), true));
+}
+
+function scheduleProjectPerformanceUpdate(): void {
+  if (!projectLogToggle.checked || projectPerformanceTimer !== undefined) return;
+  projectPerformanceTimer = setTimeout(() => {
+    projectPerformanceTimer = undefined;
+    publishProjectPerformance();
+  }, 150);
+}
+
+function publishProjectLog(): void {
+  if (!projectLogToggle.checked) return;
+  void emitTo("project-log", "project-log-updated", {
+    catalog: projectLog.catalog.map(({ message }) => message),
+    lookup: projectLog.lookup.map(({ message }) => message),
+    presets: projectLog.presets.map(({ message }) => message),
+    presetLoadCount,
+  }).catch((error) => setStatus(String(error), true));
+}
+
+function appendProjectLog(section: keyof typeof projectLog, message: string): (message: string) => void {
+  const entry = { message };
+  const entries = projectLog[section];
+  entries.unshift(entry);
+  if (entries.length > 30) entries.pop();
+  publishProjectLog();
+  return (updated) => {
+    entry.message = updated;
+    publishProjectLog();
+  };
+}
+
 function clearProjectCache(): void {
   projectCacheGeneration++;
   projectCacheKey = undefined;
   projectId = undefined;
   projectIndex = [];
+  projectChildren.clear();
   binStack = [];
   expandedBins.clear();
 }
@@ -335,31 +421,28 @@ async function loadProjectMedia(force = false): Promise<void> {
   const key = !force && performance.now() - projectScannedAt < 30_000 ? projectCacheKey : undefined;
   projectError = "";
   render();
-  const log = element("project-log");
-  const entry = document.createElement("li");
   const startedAt = performance.now();
   const label = `#${++projectScanCount} · ${new Date().toLocaleTimeString()}`;
-  entry.textContent = `${label} · Checking project…`;
-  log.prepend(entry);
-  if (log.children.length > 30) log.lastElementChild?.remove();
+  const entry = appendProjectLog("catalog", `${label} · Checking project…`);
   try {
     const { key: currentKey, catalog } = await invoke<ProjectCatalogReply>("run_palette_command", {
       action: "list-project-media", value: key,
     });
     const elapsed = Math.round(performance.now() - startedAt);
-    entry.textContent = catalog
+    entry(catalog
       ? `${label} · Full scan · ${catalog.items.length} items · ${elapsed} ms`
-      : `${label} · Cache hit · ${elapsed} ms`;
+      : `${label} · Cache hit · ${elapsed} ms`);
     if (generation === projectCacheGeneration && snapshot?.connected && catalog) {
       if (projectId !== undefined && projectId !== catalog.projectId) clearProjectCache();
       projectId = catalog.projectId;
       projectIndex = indexProjectMedia(catalog.items);
+      rebuildProjectTree();
       projectCacheKey = currentKey;
       projectScannedAt = performance.now();
     }
   } catch (error) {
     if (generation === projectCacheGeneration) projectError = String(error);
-    entry.textContent = `${label} · Request failed · ${String(error)}`;
+    entry(`${label} · Request failed · ${String(error)}`);
   } finally {
     projectLoading = false;
     render();
@@ -453,7 +536,7 @@ async function apply(effect: PaletteItem, alternate = false): Promise<void> {
   if (!snapshot?.connected) { setStatus("Connect the Helm panel in Premiere first.", true); return; }
   if (effect.kind === "project" && effect.mediaType === "bin") {
     if (browsingProjectTree()) {
-      if (!projectIndex.some(({ item }) => item.binIds?.at(-1) === effect.id)) return;
+      if (!projectChildren.has(effect.id)) return;
       selected = visible.findIndex((item) => item.kind === "project" && item.id === effect.id);
       if (expandedBins.has(effect.id)) expandedBins.delete(effect.id);
       else expandedBins.add(effect.id);
@@ -471,10 +554,21 @@ async function apply(effect: PaletteItem, alternate = false): Promise<void> {
     isRevealPreset ? `Locating ${effect.name}…` : `Applying ${effect.name}…`);
   try {
     if (effect.kind === "project") {
-      const result = await invoke<{ message: string }>("run_palette_command", {
+      const action = effect.mediaType === "sequence"
+        ? alternate ? "Open Timeline" : "Nest"
+        : alternate ? "Source Monitor" : "Insert";
+      const label = `${new Date().toLocaleTimeString()} · ${action} · ${effect.name}`;
+      const result = await invoke<{ message: string; lookup?: ProjectItemLookup }>("run_palette_command", {
         action: alternate ? "open-project-source" : "insert-project-media",
         value: { projectId: effect.projectId, id: effect.id, ...projectQuery(input.value).tracks },
+      }).catch((error) => {
+        appendProjectLog("lookup", `${label} · ${String(error)}`);
+        throw error;
       });
+      if (result.lookup) {
+        const source = result.lookup.source === "cache" ? "Lookup hit" : "Fresh lookup";
+        appendProjectLog("lookup", `${label} · ${source} · ${result.lookup.elapsedMs} ms`);
+      }
       setStatus(result.message);
       await invoke("dismiss_palette", { restoreFocus: true });
       return;
@@ -535,8 +629,31 @@ function rebuildIndex(): void {
   index = indexEffects([...(snapshot?.effects ?? []), ...presets.map((preset) => ({ ...preset, kind: "preset" as const }))]);
 }
 
-async function loadPresets(refresh = false): Promise<void> {
-  presets = await invoke<Preset[]>("get_presets", { refresh });
+type PresetLoadReason = "Startup" | "Library changed" | "Manual refresh";
+let presetLoadPending: Promise<void> | undefined;
+
+function loadPresets(reason: PresetLoadReason): Promise<void> {
+  const load = (presetLoadPending ?? Promise.resolve())
+    .catch(() => { /* A later refresh can recover from an earlier read error. */ })
+    .then(() => readPresets(reason))
+    .finally(() => {
+      if (presetLoadPending === load) presetLoadPending = undefined;
+    });
+  presetLoadPending = load;
+  return load;
+}
+
+async function readPresets(reason: PresetLoadReason): Promise<void> {
+  const startedAt = performance.now();
+  const label = `#${++presetLoadCount} · ${new Date().toLocaleTimeString()} · ${reason}`;
+  const entry = appendProjectLog("presets", `${label} · Loading…`);
+  try {
+    presets = await invoke<Preset[]>("get_presets", { refresh: reason === "Manual refresh" });
+    entry(`${label} · ${presets.length} presets · ${Math.round(performance.now() - startedAt)} ms`);
+  } catch (error) {
+    entry(`${label} · Load failed · ${String(error)}`);
+    throw error;
+  }
   rebuildIndex();
   render();
 }
@@ -549,7 +666,7 @@ input.addEventListener("input", () => {
   }
   if (!/^go to marker(?:\s|$)/i.test(input.value.trimStart())) markers = undefined;
   selected = 0;
-  render();
+  if (inputRenderFrame === undefined) inputRenderFrame = requestAnimationFrame(render);
 });
 for (const mode of searchModes) {
   element(`${mode}-mode`).addEventListener("click", () => {
@@ -605,6 +722,9 @@ document.addEventListener("keydown", async (event) => {
     return;
   }
   if (settingsOpen || busy) return;
+  if (inputRenderFrame !== undefined && ["Enter", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key)) {
+    render();
+  }
   if (searchMode === "project" && event.target === input &&
       !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey) {
     const item = visible[selected];
@@ -659,10 +779,20 @@ document.addEventListener("keydown", async (event) => {
 element("settings-toggle").addEventListener("click", () => openSettings(!settingsOpen));
 const projectLogToggle = element<HTMLInputElement>("show-project-log");
 try { projectLogToggle.checked = localStorage.getItem("helm-show-project-log") === "true"; } catch { /* Use the default. */ }
-element("project-log").hidden = !projectLogToggle.checked;
-projectLogToggle.addEventListener("change", () => {
-  element("project-log").hidden = !projectLogToggle.checked;
-  try { localStorage.setItem("helm-show-project-log", String(projectLogToggle.checked)); } catch { /* Visibility still works for this session. */ }
+projectLogToggle.addEventListener("change", async () => {
+  const visible = projectLogToggle.checked;
+  projectLogToggle.disabled = true;
+  try {
+    await invoke("set_project_log_visible", { visible });
+    publishProjectLog();
+    publishProjectPerformance();
+    try { localStorage.setItem("helm-show-project-log", String(visible)); } catch { /* Visibility still works for this session. */ }
+  } catch (error) {
+    projectLogToggle.checked = !visible;
+    setStatus(String(error), true);
+  } finally {
+    projectLogToggle.disabled = false;
+  }
 });
 element("setup-button").addEventListener("click", () => openSettings(true));
 element("back").addEventListener("click", () => openSettings(false));
@@ -689,7 +819,7 @@ element("refresh").addEventListener("click", async () => {
   busy = true;
   setStatus("Refreshing Premiere effects and presets…");
   try {
-    await loadPresets(true);
+    await loadPresets("Manual refresh");
     if (snapshot?.connected) {
       await Promise.all([invoke("refresh_catalog"), loadProjectMedia(true)]);
     }
@@ -700,7 +830,24 @@ element("refresh").addEventListener("click", async () => {
 });
 
 async function start(): Promise<void> {
+  await getCurrentWebviewWindow().listen("project-log-ready", () => {
+    publishProjectLog();
+    publishProjectPerformance();
+  });
+  if (projectLogToggle.checked) {
+    try {
+      await invoke("set_project_log_visible", { visible: true });
+      publishProjectLog();
+      publishProjectPerformance();
+    } catch (error) {
+      projectLogToggle.checked = false;
+      setStatus(String(error), true);
+    }
+  }
   await listen<BridgeSnapshot>("bridge-changed", ({ payload }) => update(payload));
+  await listen("preset-library-changed", () => {
+    if (!presetLoadPending) void loadPresets("Library changed").catch((error) => setStatus(String(error), true));
+  });
   await listen<boolean>("project-catalog-changed", ({ payload: reset }) => {
     if (reset) {
       clearProjectCache();
@@ -715,14 +862,13 @@ async function start(): Promise<void> {
     setSearchMode("all");
     openSettings(false);
     input.focus();
-    void loadPresets().catch((error) => setStatus(String(error), true));
   });
   window.addEventListener("blur", () => {
     if (recordingShortcut) stopRecordingShortcut();
   });
   update(await invoke<BridgeSnapshot>("get_snapshot"));
   input.focus();
-  await loadPresets();
+  await loadPresets("Startup");
 }
 
 void start().catch((error) => setStatus(`Could not initialize Helm: ${error}`, true));

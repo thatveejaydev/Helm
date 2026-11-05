@@ -2,6 +2,6 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "palette",
   "description": "Local palette window",
-  "windows": ["palette"],
+  "windows": ["palette", "project-log"],
   "permissions": ["core:default"]
 }

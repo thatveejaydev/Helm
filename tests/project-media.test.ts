@@ -28,7 +28,10 @@ function fixture(videoRanges: [number, number][][] = [[], []], circular = false)
   };
   const sequenceItem = { type: 2, name: "Edit", getId: () => "sequence" };
   const nestItem = { type: 3, name: "Review Cut", getId: () => "nest" };
-  const bin = { type: 1, name: "Interviews", getId: () => "interviews", getItems: async () => [media, nestItem] };
+  const binItems = [media, nestItem];
+  const bin = { type: 1, name: "Interviews", getId: () => "interviews", getItems: async () => binItems };
+  const rootItems = [sequenceItem, bin];
+  let rootReads = 0;
   const playhead = { ticks: "100" };
   const sequence = {
     guid: "sequence", getProjectItem: async () => sequenceItem, getPlayerPosition: async () => playhead,
@@ -53,7 +56,10 @@ function fixture(videoRanges: [number, number][][] = [[], []], circular = false)
   let activeProjectId = "project";
   const project = {
     get guid() { return activeProjectId; },
-    getRootItem: async () => ({ getItems: async () => [sequenceItem, bin] }),
+    getRootItem: async () => {
+      rootReads++;
+      return { getItems: async () => rootItems };
+    },
     getSequences: async () => [sequence, nest],
     getActiveSequence: async () => sequence,
     openSequence: async (item: unknown) => { openedSequences.push(item); return true; },
@@ -77,8 +83,28 @@ function fixture(videoRanges: [number, number][][] = [[], []], circular = false)
       createInsertProjectItemAction: (...args: unknown[]) => args,
     }) },
   } as unknown as premierepro;
-  return { host, actions, opened, openedSequences, playhead, media, nest, nestItem, switchProject: () => { activeProjectId = "other"; } };
+  return { host, actions, opened, openedSequences, playhead, media, nest, nestItem, binItems, rootItems,
+    get rootReads() { return rootReads; }, switchProject: () => { activeProjectId = "other"; } };
 }
+
+test("project actions reuse a known bin and recover when an item moves or is removed", async () => {
+  const project = fixture();
+  const { host, media, binItems, rootItems } = project;
+  const selection = { projectId: "project", id: "media" };
+  await readProjectCatalog(host, undefined, () => 0);
+  const preview = await runCommand(host, "open-project-source", selection);
+  const insert = await runCommand(host, "insert-project-media", selection);
+  assert.ok("lookup" in preview && preview.lookup.source === "cache");
+  assert.ok("lookup" in insert && insert.lookup.source === "cache");
+  assert.equal(project.rootReads, 1);
+  binItems.shift();
+  rootItems.push(media);
+  const moved = await runCommand(host, "open-project-source", selection);
+  assert.ok("lookup" in moved && moved.lookup.source === "scan");
+  assert.equal(project.rootReads, 2);
+  rootItems.pop();
+  await assert.rejects(runCommand(host, "open-project-source", selection), /no longer in the project/);
+});
 
 test("opening a project result previews media and opens sequences in the timeline", async () => {
   const { host, actions, opened, openedSequences, media, nest, switchProject } = fixture();

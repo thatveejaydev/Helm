@@ -63,6 +63,30 @@ fn resize_palette(app: tauri::AppHandle, expanded: bool) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn set_project_log_visible(app: tauri::AppHandle, visible: bool) -> Result<(), String> {
+    let log = app.get_webview_window("project-log").ok_or("Helm's debug log is unavailable.")?;
+    if !visible {
+        return log.hide().map_err(|error| error.to_string());
+    }
+    let monitor = app.get_webview_window("palette")
+        .and_then(|palette| palette.current_monitor().ok().flatten())
+        .or_else(|| log.primary_monitor().ok().flatten());
+    if let Some(monitor) = monitor {
+        let area = monitor.work_area();
+        let scale = monitor.scale_factor();
+        let margin = (12.0 * scale).round() as u32;
+        let width = ((400.0 * scale).round() as u32).min(area.size.width.saturating_sub(2 * margin).max(1));
+        let height = ((430.0 * scale).round() as u32).min(area.size.height.saturating_sub(2 * margin).max(1));
+        log.set_size(tauri::PhysicalSize::new(width, height)).map_err(|error| error.to_string())?;
+        log.set_position(tauri::PhysicalPosition::new(
+            area.position.x + area.size.width.saturating_sub(width + margin) as i32,
+            area.position.y + margin as i32,
+        )).map_err(|error| error.to_string())?;
+    }
+    log.show().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn dismiss_palette(app: tauri::AppHandle, restore_focus: bool) {
     if let Some(window) = app.get_webview_window("palette") {
         let was_focused = window.is_focused().unwrap_or(false);
@@ -304,6 +328,7 @@ fn main() {
         .manage(presets::PresetLibrary::default())
         .invoke_handler(tauri::generate_handler![
             dismiss_palette,
+            set_project_log_visible,
             resize_palette,
             open_effect_controls,
             get_snapshot,
@@ -330,6 +355,22 @@ fn main() {
             app.manage(bridge.clone());
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(bridge::serve(handle, bridge.clone()));
+            if let Ok(documents) = app.path().document_dir() {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        let app = handle.clone();
+                        let documents = documents.clone();
+                        let changed = tauri::async_runtime::spawn_blocking(move || {
+                            app.state::<presets::PresetLibrary>().has_changed(&documents)
+                        }).await;
+                        if matches!(changed, Ok(true)) {
+                            let _ = handle.emit("preset-library-changed", ());
+                        }
+                    }
+                });
+            }
             let shortcut = bridge.snapshot().shortcut;
             if let Err(error) = app.global_shortcut().register(shortcut.as_str()) {
                 let mut reset_fallback = false;
@@ -366,7 +407,9 @@ fn main() {
         .on_window_event(|window, event| match event {
             tauri::WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
-                let _ = window.hide();
+                if window.label() == "palette" {
+                    let _ = window.hide();
+                }
             }
             tauri::WindowEvent::Focused(false) => {
                 if window.label() == "palette" && window.is_visible().unwrap_or(false) {

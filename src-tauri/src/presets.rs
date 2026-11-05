@@ -61,7 +61,23 @@ struct CachedLibrary {
     presets: Vec<Preset>,
 }
 
+impl CachedLibrary {
+    fn matches(&self, path: &Path, modified: SystemTime, len: u64) -> bool {
+        self.path == path && self.modified == modified && self.len == len
+    }
+}
+
 impl PresetLibrary {
+    pub fn has_changed(&self, documents: &Path) -> bool {
+        let current = find_library(documents);
+        let cache = self.0.lock().unwrap();
+        match (current, cache.as_ref()) {
+            (Some((path, modified, len)), Some(cached)) => !cached.matches(&path, modified, len),
+            (None, None) => false,
+            _ => true,
+        }
+    }
+
     pub fn load(&self, documents: &Path, refresh: bool) -> Result<Vec<Preset>, String> {
         let mut cache = self.0.lock().unwrap();
         let Some((path, modified, len)) = find_library(documents) else {
@@ -69,7 +85,7 @@ impl PresetLibrary {
             return Ok(Vec::new());
         };
         if let Some(cached) = cache.as_ref() {
-            if !refresh && cached.path == path && cached.modified == modified && cached.len == len {
+            if !refresh && cached.matches(&path, modified, len) {
                 return Ok(cached.presets.clone());
             }
         }
@@ -479,6 +495,30 @@ fn parse_start_keyframe_value(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_preset_library_creation_update_and_removal() {
+        let documents = std::env::temp_dir().join(format!("helm-presets-{}", uuid::Uuid::new_v4()));
+        let profile = documents.join("Adobe/Premiere Pro/26.0/Profile-Test");
+        let path = profile.join(LIBRARY_NAME);
+        let library = PresetLibrary::default();
+
+        assert!(!library.has_changed(&documents));
+        fs::create_dir_all(&profile).unwrap();
+        fs::write(&path, "<PremiereData/>").unwrap();
+        assert!(library.has_changed(&documents));
+        library.load(&documents, false).unwrap();
+        assert!(!library.has_changed(&documents));
+
+        fs::write(&path, "<PremiereData></PremiereData>").unwrap();
+        assert!(library.has_changed(&documents));
+        library.load(&documents, false).unwrap();
+        fs::remove_file(path).unwrap();
+        assert!(library.has_changed(&documents));
+        library.load(&documents, false).unwrap();
+        assert!(!library.has_changed(&documents));
+        fs::remove_dir_all(documents).unwrap();
+    }
 
     #[test]
     fn parses_static_and_keyframed_presets() {
