@@ -1,4 +1,4 @@
-import type { CatalogItem } from "../shared/protocol";
+import type { CatalogItem, ProjectMedia } from "../shared/protocol";
 
 export interface SearchEntry {
   effect: CatalogItem;
@@ -19,7 +19,7 @@ export function indexEffects(effects: CatalogItem[]): SearchEntry[] {
   });
 }
 
-function score(entry: SearchEntry, query: string): number {
+export function score(entry: Omit<SearchEntry, "effect">, query: string): number {
   if (entry.normalized === query) return 0;
   if (entry.normalized.startsWith(query)) return 10;
   if (entry.words.some((word) => word.startsWith(query))) return 20;
@@ -38,6 +38,30 @@ function score(entry: SearchEntry, query: string): number {
   return 100 + gaps;
 }
 
+export function indexProjectMedia(items: ProjectMedia[]) {
+  return items.map((item) => {
+    const normalized = normalize(item.name);
+    return {
+      item, normalized, words: normalized.split(/[^\p{L}\p{N}]+/u),
+      folderSearch: normalize([...item.bins, item.name].join(" ")),
+    };
+  });
+}
+
+export function searchProjectMedia(index: ReturnType<typeof indexProjectMedia>, query: string, limit = 60): ProjectMedia[] {
+  return rankProjectMedia(index, query, limit).map(({ item }) => item);
+}
+
+export function rankProjectMedia(index: ReturnType<typeof indexProjectMedia>, query: string, limit: number) {
+  const normalized = normalize(query);
+  return index
+    .map((entry) => ({ item: entry.item, rank: normalized ? score(entry, normalized) : 0 }))
+    .filter(({ rank }) => Number.isFinite(rank))
+    .sort((a, b) => a.rank - b.rank || a.item.name.localeCompare(b.item.name) ||
+      a.item.bins.join("/").localeCompare(b.item.bins.join("/")))
+    .slice(0, limit);
+}
+
 export function searchEffects(
   index: SearchEntry[],
   query: string,
@@ -45,18 +69,32 @@ export function searchEffects(
   recent: string[],
   limit = 9,
 ): CatalogItem[] {
+  return rankEffects(index, query, kind, recent, limit).map(({ item }) => item);
+}
+
+export function rankEffects(
+  index: SearchEntry[], query: string, kind: CatalogItem["kind"] | "all", recent: string[], limit: number,
+) {
   const normalized = normalize(query);
   return index
     .filter(({ effect }) => kind === "all" || effect.kind === kind)
     .map((entry) => {
       const recentIndex = recent.indexOf(entry.effect.id);
       return {
-        entry,
+        item: entry.effect,
         rank: normalized ? score(entry, normalized) : recentIndex < 0 ? 1000 : recentIndex,
       };
     })
     .filter(({ rank }) => Number.isFinite(rank))
-    .sort((a, b) => a.rank - b.rank || a.entry.effect.name.localeCompare(b.entry.effect.name))
-    .slice(0, limit)
-    .map(({ entry }) => entry.effect);
+    .sort((a, b) => a.rank - b.rank || a.item.name.localeCompare(b.item.name))
+    .slice(0, limit);
+}
+
+export function mergeSearchResults<T extends { name: string }>(
+  groups: { item: T; rank: number }[][], query: string, limit: number,
+): T[] {
+  const mixed = Array.from({ length: limit }, (_, index) =>
+    groups.flatMap((group) => group.slice(index, index + 1))).flat();
+  if (normalize(query)) mixed.sort((a, b) => a.rank - b.rank || a.item.name.localeCompare(b.item.name));
+  return mixed.slice(0, limit).map(({ item }) => item);
 }

@@ -55,3 +55,15 @@ export interface SequenceMarker {
   name: string;
   seconds: number;
 }
+
+export interface ProjectMedia {
+  mediaType?: "video" | "audio" | "image" | "generated" | "sequence" | "other";
+  id: string;
+  name: string;
+  bins: string[];
+}
+
+export interface ProjectMediaCatalog {
+  projectId: string;
+  items: ProjectMedia[];
+}

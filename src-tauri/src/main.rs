@@ -127,7 +127,8 @@ async fn run_palette_command(
                 Err("Copy and Paste Attributes are available on Windows.".into())
             }
         }
-        "remove-attributes" | "set-opacity" | "set-volume" | "add-marker" | "list-markers" | "go-to-marker" => {
+        "remove-attributes" | "set-opacity" | "set-volume" | "add-marker" | "list-markers" | "go-to-marker"
+        | "list-project-media" | "insert-project-media" | "open-project-source" => {
             state.request("palette-command", serde_json::json!({ "action": action, "value": value })).await
         }
         _ => Err("Unsupported Helm command.".into()),
