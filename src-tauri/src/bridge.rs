@@ -88,6 +88,10 @@ impl Bridge {
         self.snapshot.lock().unwrap().clone()
     }
 
+    pub fn shortcut(&self) -> String {
+        self.snapshot.lock().unwrap().shortcut.clone()
+    }
+
     fn emit(&self, app: &tauri::AppHandle) {
         let _ = app.emit("bridge-changed", self.snapshot());
     }

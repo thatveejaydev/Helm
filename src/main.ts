@@ -1,19 +1,19 @@
 import { invoke } from "@tauri-apps/api/core";
 import { emitTo, listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import type { ApplyResult, BridgeSnapshot, CatalogItem, Preset, ProjectMedia, ProjectCatalogKey, ProjectCatalogReply, ProjectItemLookup, SequenceMarker } from "../shared/protocol";
+import type { ApplyResult, BridgeSnapshot, CatalogItem, Effect, Preset, ProjectMedia, ProjectCatalogKey, ProjectCatalogReply, ProjectItemLookup, SequenceMarker } from "../shared/protocol";
 import { indexEffects, indexProjectMedia, mergeSearchResults, normalize, rankEffects, rankProjectMedia, score, type SearchEntry } from "./search";
 import { captureShortcut } from "./shortcut";
 import "./style.css";
 
 document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
   <section id="palette">
-    <div class="search-box"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" stroke="currentColor" stroke-width="1.7"/><path d="m16 16 4.5 4.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg><input id="search" placeholder="Search effects, project media, and commands…" aria-label="Search effects, project media, and commands" role="combobox" aria-autocomplete="list" aria-controls="results" aria-expanded="true" autocomplete="off" spellcheck="false" /><kbd>ESC</kbd></div>
+    <div class="search-box"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" stroke="currentColor" stroke-width="1.7"/><path d="m16 16 4.5 4.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg><input id="search" placeholder="Search effects, project media, and actions…" aria-label="Search effects, project media, and actions" role="combobox" aria-autocomplete="list" aria-controls="results" aria-expanded="true" autocomplete="off" spellcheck="false" /><kbd>ESC</kbd></div>
     <div class="search-modes" role="group" aria-label="Search mode">
       <button id="all-mode" type="button" aria-pressed="true">All</button>
       <button id="effects-mode" type="button" aria-pressed="false">Effects</button>
       <button id="project-mode" type="button" aria-pressed="false" title="Press Tab from an empty search to switch modes, or type project:">Project</button>
-      <button id="commands-mode" type="button" aria-pressed="false">Commands</button>
+      <button id="actions-mode" type="button" aria-pressed="false">Actions</button>
       <span id="insert-hint" hidden>Enter inserts · Shift+Enter opens item · v2: a2: prefers tracks</span>
     </div>
     <div id="results" role="listbox" aria-label="Palette results"></div>
@@ -33,6 +33,21 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
     <div class="footer-info"><span id="status" role="status">Ready when you are.</span></div>
     <div class="footer-actions"><span id="connection" class="connection">Connecting</span><button id="settings-toggle" class="icon-button" aria-label="Connection settings" title="Connection settings">⚙</button></div>
   </footer>
+  <button id="effect-shortcut-menu" class="effect-shortcut-menu" type="button" hidden>Assign shortcut…</button>
+  <dialog id="effect-shortcut-dialog" aria-labelledby="effect-shortcut-name">
+    <div class="shortcut-dialog-heading">
+      <span id="effect-shortcut-icon" class="effect-icon video" aria-hidden="true">ƒx</span>
+      <div><div class="eyebrow">EFFECT SHORTCUT</div><h2 id="effect-shortcut-name"></h2></div>
+    </div>
+    <div id="effect-shortcut-keys" class="shortcut-key-preview" aria-live="polite"></div>
+    <p class="shortcut-warning">This combination may override a Premiere shortcut. Windows reserves it while Helm is running.</p>
+    <p id="effect-shortcut-error" class="shortcut-error" role="alert"></p>
+    <div class="shortcut-dialog-actions">
+      <button id="remove-effect-shortcut" class="secondary" type="button" hidden>Remove</button>
+      <button id="cancel-effect-shortcut" class="secondary" type="button" autofocus>Cancel</button>
+      <button id="save-effect-shortcut" class="primary" type="button" disabled>Save shortcut</button>
+    </div>
+  </dialog>
 `;
 
 function element<T extends HTMLElement>(id: string): T {
@@ -43,8 +58,76 @@ const input = element<HTMLInputElement>("search");
 const results = element<HTMLDivElement>("results");
 let snapshot: BridgeSnapshot | undefined;
 let index: SearchEntry[] = [];
-interface CommandItem {
-  kind: "command";
+let effectShortcuts: Record<string, string> = {};
+let shortcutEffect: Effect | undefined;
+let pendingAccelerator = "";
+let savingEffectShortcut = false;
+const shortcutMenu = element<HTMLButtonElement>("effect-shortcut-menu");
+const shortcutDialog = element<HTMLDialogElement>("effect-shortcut-dialog");
+const saveEffectShortcut = element<HTMLButtonElement>("save-effect-shortcut");
+
+function previewEffectShortcut(parts: string[]): void {
+  const preview = element("effect-shortcut-keys");
+  preview.replaceChildren();
+  if (!parts.length) preview.textContent = "Press a shortcut";
+  for (const part of parts) {
+    const key = document.createElement("kbd");
+    key.textContent = part;
+    preview.append(key);
+  }
+}
+
+function showEffectShortcutMenu(effect: Effect, event: MouseEvent): void {
+  event.preventDefault();
+  if (busy) return;
+  shortcutEffect = effect;
+  const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+  shortcutMenu.textContent = effectShortcuts[effect.id] ? "Change shortcut…" : "Assign shortcut…";
+  shortcutMenu.hidden = false;
+  shortcutMenu.style.left = `${Math.max(0, Math.min(event.clientX || rect.left, innerWidth - shortcutMenu.offsetWidth - 8))}px`;
+  shortcutMenu.style.top = `${Math.max(0, Math.min(event.clientY || rect.bottom, innerHeight - shortcutMenu.offsetHeight - 8))}px`;
+  shortcutMenu.focus();
+}
+
+function openEffectShortcutRecorder(): void {
+  if (!shortcutEffect) return;
+  shortcutMenu.hidden = true;
+  pendingAccelerator = "";
+  saveEffectShortcut.disabled = true;
+  element("effect-shortcut-error").textContent = "";
+  element("effect-shortcut-name").textContent = shortcutEffect.name;
+  const icon = element("effect-shortcut-icon");
+  icon.className = `effect-icon ${shortcutEffect.kind}`;
+  icon.textContent = shortcutEffect.kind === "video" ? "ƒx" : "♫";
+  const current = effectShortcuts[shortcutEffect.id];
+  element("remove-effect-shortcut").hidden = !current;
+  previewEffectShortcut(current ? current.split("+") : []);
+  shortcutDialog.showModal();
+  void invoke("set_effect_shortcut_recording", { recording: true }).catch((error) => {
+    element("effect-shortcut-error").textContent = String(error);
+  });
+}
+
+async function updateEffectShortcut(shortcut: string | null): Promise<void> {
+  if (!shortcutEffect || savingEffectShortcut) return;
+  savingEffectShortcut = true;
+  saveEffectShortcut.disabled = true;
+  try {
+    effectShortcuts = await invoke<Record<string, string>>("set_effect_shortcut", {
+      effectId: shortcutEffect.id, shortcut,
+    });
+    shortcutDialog.close();
+    render();
+    setStatus(shortcut ? "Effect shortcut saved." : "Effect shortcut removed.");
+  } catch (error) {
+    element("effect-shortcut-error").textContent = String(error);
+  } finally {
+    savingEffectShortcut = false;
+    saveEffectShortcut.disabled = !pendingAccelerator;
+  }
+}
+interface ActionItem {
+  kind: "action";
   id: string;
   name: string;
   description: string;
@@ -52,18 +135,28 @@ interface CommandItem {
   value?: string;
 }
 
-const commands: CommandItem[] = [
-  { kind: "command", id: "copy-attributes", name: "Copy Attributes", description: "Copy source clip in Premiere" },
-  { kind: "command", id: "paste-attributes", name: "Paste Attributes", description: "Open Premiere’s paste dialog" },
-  { kind: "command", id: "remove-attributes", name: "Remove Attributes", description: "Clear applied effects" },
-  { kind: "command", id: "add-marker", name: "Add Marker", description: "Add a marker at the playhead", argument: "Marker name" },
-  { kind: "command", id: "go-to-marker", name: "Go to Marker", description: "Find a marker in the active sequence" },
-  { kind: "command", id: "set-opacity", name: "Set Opacity", description: "Set static clip opacity", argument: "Opacity (0–100%)" },
-  { kind: "command", id: "set-volume", name: "Set Clip Volume", description: "Set static clip volume", argument: "Volume (−100 to +15 dB)" },
+const actionIconPaths: Record<string, string> = {
+  "copy-attributes": "M9 9h11v11H9z M15 6V4H4v11h2",
+  "paste-attributes": "M9 5H6v15h12V5h-3 M9 4h6v4H9z M9 12h6m-6 4h6",
+  "remove-attributes": "M4 7h16m-14 0 1 13h10l1-13M9 7V4h6v3m-5 4v5m4-5v5",
+  "add-marker": "M6 20V4h9l3 3-3 3H6m11 3v6m-3-3h6",
+  "go-to-marker": "M6 20V4h9l3 3-3 3H6m6 6h8m-3-3 3 3-3 3",
+  "set-opacity": "M12 3c-2 4-6 7-6 11a6 6 0 0 0 12 0c0-4-4-7-6-11Zm-5 13h10",
+  "set-volume": "M4 9h4l5-4v14l-5-4H4z M16 9a4 4 0 0 1 0 6m2-8a7 7 0 0 1 0 10",
+};
+
+const actions: ActionItem[] = [
+  { kind: "action", id: "copy-attributes", name: "Copy Attributes", description: "Copy source clip in Premiere" },
+  { kind: "action", id: "paste-attributes", name: "Paste Attributes", description: "Open Premiere’s paste dialog" },
+  { kind: "action", id: "remove-attributes", name: "Remove Attributes", description: "Clear applied effects" },
+  { kind: "action", id: "add-marker", name: "Add Marker", description: "Add a marker at the playhead", argument: "Marker name" },
+  { kind: "action", id: "go-to-marker", name: "Go to Marker", description: "Find a marker in the active sequence" },
+  { kind: "action", id: "set-opacity", name: "Set Opacity", description: "Set static clip opacity", argument: "Opacity (0–100%)" },
+  { kind: "action", id: "set-volume", name: "Set Clip Volume", description: "Set static clip volume", argument: "Volume (−100 to +15 dB)" },
 ];
-type PaletteItem = CatalogItem | CommandItem | (ProjectMedia & { kind: "project"; projectId: string });
+type PaletteItem = CatalogItem | ActionItem | (ProjectMedia & { kind: "project"; projectId: string });
 let visible: PaletteItem[] = [];
-const searchModes = ["all", "effects", "project", "commands"] as const;
+const searchModes = ["all", "effects", "project", "actions"] as const;
 type SearchMode = typeof searchModes[number];
 let searchMode: SearchMode = "all";
 let binStack: ProjectMedia[] = [];
@@ -110,7 +203,7 @@ let expanded = false;
 let resizePending = Promise.resolve();
 
 function showsResults(): boolean {
-  return Boolean(input.value.trim()) || searchMode === "project" || searchMode === "commands";
+  return Boolean(input.value.trim()) || searchMode === "project" || searchMode === "actions";
 }
 
 function updatePaletteSize(): void {
@@ -132,7 +225,7 @@ function openSettings(open: boolean): void {
   if (!open) input.focus();
 }
 
-function matchingCommands(query: string): CommandItem[] {
+function matchingActions(query: string): ActionItem[] {
   const search = normalize(query);
   if (markers && (search === "go to marker" || search.startsWith("go to marker "))) {
     const filter = search.slice("go to marker".length).trim();
@@ -142,19 +235,19 @@ function matchingCommands(query: string): CommandItem[] {
       const time = [Math.floor(seconds / 3600), Math.floor(seconds / 60) % 60, seconds % 60]
         .map((part) => String(part).padStart(2, "0")).join(":") +
         "." + String(milliseconds % 1000).padStart(3, "0");
-      return { kind: "command", id: "go-to-marker", name: marker.name || "Untitled marker", description: time, value: marker.id };
+      return { kind: "action", id: "go-to-marker", name: marker.name || "Untitled marker", description: time, value: marker.id };
     });
   }
-  return commands.flatMap((command) => {
-    const name = normalize(command.name);
-    const aliases = command.id === "set-opacity" ? [name, "opacity"] :
-      command.id === "set-volume" ? [name, "set volume", "volume"] : [name];
+  return actions.flatMap((action) => {
+    const name = normalize(action.name);
+    const aliases = action.id === "set-opacity" ? [name, "opacity"] :
+      action.id === "set-volume" ? [name, "set volume", "volume"] : [name];
     const prefix = aliases.find((alias) => search.startsWith(alias + " "));
-    if (prefix && (command.argument || command.id === "go-to-marker")) {
+    if (prefix && (action.argument || action.id === "go-to-marker")) {
       const value = query.trim().slice(prefix.length).trim();
-      return [{ ...command, value, name: `${command.name} · ${value}` }];
+      return [{ ...action, value, name: `${action.name} · ${value}` }];
     }
-    return aliases.some((alias) => search.split(/\s+/).every((word) => alias.includes(word))) ? [command] : [];
+    return aliases.some((alias) => search.split(/\s+/).every((word) => alias.includes(word))) ? [action] : [];
   });
 }
 
@@ -230,21 +323,21 @@ function render(): void {
       .map(({ item, rank }) => ({ item: { ...item, kind: "project" as const, projectId: currentProject }, rank })) : [];
   const effectResults = searchMode === "all" || searchMode === "effects"
     ? rankEffects(index, query, "all", [], limit) : [];
-  const commandResults = searchMode === "all" || searchMode === "commands" ? matchingCommands(query) : [];
+  const actionResults = searchMode === "all" || searchMode === "actions" ? matchingActions(query) : [];
   if (searchMode === "all") {
     const markerSearch = markers && /^go to marker(?:\s|$)/i.test(query.trimStart());
     const normalizedQuery = normalize(query);
-    const rankedCommands = commandResults.map((item) => {
+    const rankedActions = actionResults.map((item) => {
       const normalized = normalize(item.name);
       const rank = item.value !== undefined ? -1 : Math.min(80, score({
         normalized, words: normalized.split(/\s+/), folderSearch: "",
       }, normalizedQuery));
       return { item, rank };
     });
-    visible = markerSearch ? commandResults :
-      mergeSearchResults<PaletteItem>([effectResults, projectResults, rankedCommands], query, limit);
+    visible = markerSearch ? actionResults :
+      mergeSearchResults<PaletteItem>([effectResults, projectResults, rankedActions], query, limit);
   } else {
-    visible = [...effectResults.map(({ item }) => item), ...projectResults.map(({ item }) => item), ...commandResults];
+    visible = [...effectResults.map(({ item }) => item), ...projectResults.map(({ item }) => item), ...actionResults];
   }
   selected = Math.min(selected, Math.max(0, visible.length - 1));
   const previousRows = Array.from(results.children) as HTMLButtonElement[];
@@ -255,7 +348,7 @@ function render(): void {
       binStack.length, projectChildren.has(effect.id), expandedBins.has(effect.id),
     ] : null;
     const details = effect.kind === "project" ? [effect.projectId, effect.mediaType, effect.bins, effect.binIds?.length] :
-      effect.kind === "preset" ? effect.folders : effect.kind === "command" ? [effect.description, effect.value] : null;
+      effect.kind === "preset" ? effect.folders : effect.kind === "action" ? [effect.description, effect.value] : effectShortcuts[effect.id];
     const key = JSON.stringify([effect.kind, effect.id, effect.name, details, treeState]);
     const row = reusableRows.get(key) ?? createResultRow(effect, tree);
     reusableRows.delete(key);
@@ -277,7 +370,7 @@ function render(): void {
   element("empty").hidden = visible.length > 0;
   if (!visible.length) {
     const connected = snapshot?.connected;
-    const noMatches = searchMode === "commands" || index.length;
+    const noMatches = searchMode === "actions" || index.length;
     element("empty-title").textContent = noMatches ? "No matching results" : connected ? "Getting your effects…" : "Connect to Premiere";
     element("empty-message").textContent = noMatches ? "Try a shorter name." : connected ? "Reading the effects installed in Premiere." : "Connect the Helm Bridge panel in Premiere to get started.";
     element("setup-button").hidden = !!connected;
@@ -297,7 +390,10 @@ function createResultRow(effect: PaletteItem, tree: boolean): HTMLButtonElement 
   row.role = "option";
   const icon = document.createElement("span");
   icon.className = `effect-icon ${effect.kind}`;
-  icon.textContent = { video: "ƒx", audio: "♫", preset: "◇", command: "⌘", project: "▤" }[effect.kind];
+  icon.textContent = { video: "ƒx", audio: "♫", preset: "◇", action: "", project: "▤" }[effect.kind];
+  if (effect.kind === "action") {
+    icon.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="${actionIconPaths[effect.id]}" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  }
   if (effect.kind === "project") {
     const mediaType = effect.mediaType ?? "other";
     icon.classList.add(`media-${mediaType}`);
@@ -318,7 +414,7 @@ function createResultRow(effect: PaletteItem, tree: boolean): HTMLButtonElement 
     if (effect.mediaType === "sequence") type.textContent = `Sequence · ${type.textContent}`;
     if (effect.mediaType === "bin") type.textContent = `Bin · ${type.textContent}`;
     row.title = `${type.textContent} › ${effect.name}`;
-  } else if (effect.kind === "command") {
+  } else if (effect.kind === "action") {
     type.textContent = effect.description;
   } else {
     type.textContent = effect.kind === "video" ? "Video effect" : "Audio effect";
@@ -327,6 +423,17 @@ function createResultRow(effect: PaletteItem, tree: boolean): HTMLButtonElement 
   enter.className = "row-enter";
   enter.textContent = effect.kind === "project" && effect.mediaType === "bin" ? "" : "↵";
   row.append(icon, name, type, enter);
+  if (effect.kind === "video" || effect.kind === "audio") {
+    const accelerator = effectShortcuts[effect.id];
+    if (accelerator) {
+      const badge = document.createElement("kbd");
+      badge.className = "effect-shortcut-badge";
+      badge.textContent = accelerator.replaceAll("+", " + ");
+      row.classList.add("has-effect-shortcut");
+      row.append(badge);
+    }
+    row.addEventListener("contextmenu", (event) => showEffectShortcutMenu(effect, event));
+  }
   if (tree && effect.kind === "project") {
     row.classList.add("project-tree-row");
     const depth = Math.max(0, (effect.binIds?.length ?? 0) - binStack.length);
@@ -459,7 +566,7 @@ function setSearchMode(mode: SearchMode): void {
   markers = undefined;
   binStack = [];
   expandedBins.clear();
-  input.placeholder = { all: "Search effects, project media, and commands…", effects: "Find an effect or preset…", project: "Find media, sequences, or bins…", commands: "Find a command…" }[mode];
+  input.placeholder = { all: "Search effects, project media, and actions…", effects: "Find an effect or preset…", project: "Find media, sequences, or bins…", actions: "Find an action…" }[mode];
   input.setAttribute("aria-label", input.placeholder);
   for (const option of searchModes) {
     element(`${option}-mode`).setAttribute("aria-pressed", String(option === mode));
@@ -500,33 +607,33 @@ function leaveBin(): void {
   if (previous >= 0) select(previous);
 }
 
-async function runCommand(command: CommandItem): Promise<void> {
-  const invokeCommand = (action: string, value?: string | number) =>
+async function runAction(action: ActionItem): Promise<void> {
+  const invokeAction = (action: string, value?: string | number) =>
     invoke<{ message?: string; markers?: SequenceMarker[]; native?: boolean }>("run_palette_command", { action, value });
-  if (command.id === "go-to-marker" && !markers) {
-    const result = await invokeCommand("list-markers");
+  if (action.id === "go-to-marker" && !markers) {
+    const result = await invokeAction("list-markers");
     markers = result.markers ?? [];
-    input.value = command.value ? `Go to Marker ${command.value}` : "Go to Marker ";
+    input.value = action.value ? `Go to Marker ${action.value}` : "Go to Marker ";
     selected = 0;
     render();
     input.focus();
     setStatus(markers.length ? "Type a marker name, then press Enter to jump." : "This sequence has no markers.");
     return;
   }
-  if (command.argument && !command.value) {
-    input.value = command.name + " ";
+  if (action.argument && !action.value) {
+    input.value = action.name + " ";
     input.focus();
-    setStatus(command.argument);
+    setStatus(action.argument);
     return;
   }
-  let value: string | number | undefined = command.value;
-  if (command.id === "set-opacity" || command.id === "set-volume") {
-    const opacity = command.id === "set-opacity";
+  let value: string | number | undefined = action.value;
+  if (action.id === "set-opacity" || action.id === "set-volume") {
+    const opacity = action.id === "set-opacity";
     const number = value?.replace(opacity ? /\s*%$/ : /\s*dB$/i, "").trim() ?? "";
-    if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(number)) throw new Error(`Enter a numeric value. ${command.argument}.`);
+    if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(number)) throw new Error(`Enter a numeric value. ${action.argument}.`);
     value = Number(number);
   }
-  const result = await invokeCommand(command.id, value);
+  const result = await invokeAction(action.id, value);
   setStatus(result.message ?? "Done.");
   if (!result.native) await invoke("dismiss_palette", { restoreFocus: true });
 }
@@ -573,8 +680,8 @@ async function apply(effect: PaletteItem, alternate = false): Promise<void> {
       await invoke("dismiss_palette", { restoreFocus: true });
       return;
     }
-    if (effect.kind === "command") {
-      await runCommand(effect);
+    if (effect.kind === "action") {
+      await runAction(effect);
       return;
     }
     if (effect.kind === "preset") {
@@ -678,7 +785,51 @@ for (const mode of searchModes) {
 }
 input.addEventListener("compositionstart", () => { composing = true; });
 input.addEventListener("compositionend", () => { composing = false; });
+shortcutMenu.addEventListener("click", openEffectShortcutRecorder);
+document.addEventListener("pointerdown", (event) => {
+  if (event.target !== shortcutMenu) shortcutMenu.hidden = true;
+});
+element("cancel-effect-shortcut").addEventListener("click", () => {
+  if (!savingEffectShortcut) shortcutDialog.close();
+});
+element("remove-effect-shortcut").addEventListener("click", () => void updateEffectShortcut(null));
+saveEffectShortcut.addEventListener("click", () => {
+  if (pendingAccelerator) void updateEffectShortcut(pendingAccelerator);
+});
+shortcutDialog.addEventListener("cancel", (event) => {
+  if (savingEffectShortcut) event.preventDefault();
+});
+shortcutDialog.addEventListener("close", () => {
+  void invoke("set_effect_shortcut_recording", { recording: false }).catch((error) => setStatus(String(error), true));
+  input.focus();
+});
+
 document.addEventListener("keydown", async (event) => {
+  if (shortcutDialog.open) {
+    if (event.isComposing || event.key === "Escape" || (event.key === "Tab" && !event.ctrlKey && !event.altKey && !event.metaKey)) return;
+    if (event.key === "Enter" && !event.ctrlKey && !event.altKey && !event.shiftKey && !event.metaKey) {
+      if (pendingAccelerator && event.target !== element("remove-effect-shortcut")) {
+        event.preventDefault();
+        if (!event.repeat) void updateEffectShortcut(pendingAccelerator);
+      }
+      return;
+    }
+    event.preventDefault();
+    if (savingEffectShortcut || event.repeat) return;
+    const captured = captureShortcut(event);
+    if (!captured) return;
+    pendingAccelerator = captured.complete && !captured.error ? captured.accelerator : "";
+    saveEffectShortcut.disabled = !pendingAccelerator;
+    previewEffectShortcut(captured.display ? captured.display.split(" + ") : []);
+    element("effect-shortcut-error").textContent = captured.error ?? "";
+    return;
+  }
+  if (!shortcutMenu.hidden && event.key === "Escape") {
+    event.preventDefault();
+    shortcutMenu.hidden = true;
+    input.focus();
+    return;
+  }
   if (recordingShortcut) {
     event.preventDefault();
     event.stopPropagation();
@@ -830,6 +981,14 @@ element("refresh").addEventListener("click", async () => {
 });
 
 async function start(): Promise<void> {
+  await listen<string>("effect-shortcut-error", ({ payload }) => setStatus(payload, true));
+  await listen("effect-shortcut-conflict", () => {
+    if (!shortcutDialog.open || savingEffectShortcut) return;
+    pendingAccelerator = "";
+    saveEffectShortcut.disabled = true;
+    previewEffectShortcut([]);
+    element("effect-shortcut-error").textContent = "That shortcut is already assigned in Helm.";
+  });
   await getCurrentWebviewWindow().listen("project-log-ready", () => {
     publishProjectLog();
     publishProjectPerformance();
@@ -858,6 +1017,8 @@ async function start(): Promise<void> {
   });
   await listen("palette-opened", () => {
     if (busy) return;
+    shortcutMenu.hidden = true;
+    if (shortcutDialog.open && !savingEffectShortcut) shortcutDialog.close();
     input.value = "";
     setSearchMode("all");
     openSettings(false);
@@ -867,6 +1028,8 @@ async function start(): Promise<void> {
     if (recordingShortcut) stopRecordingShortcut();
   });
   update(await invoke<BridgeSnapshot>("get_snapshot"));
+  effectShortcuts = await invoke<Record<string, string>>("get_effect_shortcuts");
+  render();
   input.focus();
   await loadPresets("Startup");
 }

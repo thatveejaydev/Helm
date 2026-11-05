@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod bridge;
+mod effect_shortcuts;
 mod platform;
 #[cfg(windows)]
 mod preset_windows;
@@ -15,7 +16,7 @@ use tauri::{
     tray::TrayIconBuilder,
     Emitter, Manager,
 };
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 const DEFAULT_SHORTCUT: &str = "Ctrl+Alt+Space";
 const PALETTE_WIDTH: f64 = 640.0;
@@ -280,6 +281,10 @@ fn set_shortcut(
     if shortcut == current {
         return Ok(shortcut);
     }
+    let key = shortcut.parse::<Shortcut>().map_err(|error| error.to_string())?;
+    if app.state::<effect_shortcuts::EffectShortcuts>().effect_for(&key).is_some() {
+        return Err("That shortcut is already assigned to an effect.".into());
+    }
 
     let _ = app.global_shortcut().unregister(current.as_str());
 
@@ -310,8 +315,31 @@ fn main() {
         }))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|app, _, event| {
+                .with_handler(|app, key, event| {
                     if event.state() != ShortcutState::Pressed {
+                        return;
+                    }
+                    let Some(bridge) = app.try_state::<Arc<bridge::Bridge>>() else { return };
+                    let bindings = app.try_state::<effect_shortcuts::EffectShortcuts>();
+                    if bindings.as_ref().is_some_and(|bindings| bindings.recording.load(Ordering::Relaxed))
+                        && app.get_webview_window("palette").is_some_and(|window| window.is_focused().unwrap_or(false))
+                    {
+                        let _ = app.emit("effect-shortcut-conflict", ());
+                        return;
+                    }
+                    let palette_key = bridge.shortcut().parse::<Shortcut>();
+                    if !palette_key.is_ok_and(|palette_key| palette_key.id() == key.id()) {
+                        let Some(effect_id) = bindings.and_then(|bindings| bindings.effect_for(key)) else { return };
+                        let bridge = bridge.inner().clone();
+                        let app = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if !platform::foreground_premiere().is_some_and(|window| window != 0) {
+                                return;
+                            }
+                            if let Err(error) = bridge.request("apply", serde_json::json!({ "effectId": effect_id })).await {
+                                let _ = app.emit("effect-shortcut-error", error);
+                            }
+                        });
                         return;
                     }
                     if let Some(window) = app.get_webview_window("palette") {
@@ -333,6 +361,9 @@ fn main() {
             open_effect_controls,
             get_snapshot,
             apply_effect,
+            effect_shortcuts::get_effect_shortcuts,
+            effect_shortcuts::set_effect_shortcut,
+            effect_shortcuts::set_effect_shortcut_recording,
             refresh_catalog,
             run_palette_command,
             get_presets,
@@ -351,6 +382,7 @@ fn main() {
             } else {
                 std::env::current_exe()?.with_file_name(".helm")
             };
+            let bindings_path = data.join("effect-shortcuts.json");
             let bridge = Arc::new(bridge::Bridge::new(DEFAULT_SHORTCUT, data)?);
             app.manage(bridge.clone());
             let handle = app.handle().clone();
@@ -386,6 +418,10 @@ fn main() {
                     format!("Could not register {shortcut}: {error}. Open Helm from the tray.")
                 };
                 bridge.set_error(app.handle(), message);
+            }
+            let errors = effect_shortcuts::EffectShortcuts::load(app.handle(), bindings_path);
+            if !errors.is_empty() {
+                bridge.set_error(app.handle(), errors.join(" · "));
             }
             let show = MenuItem::with_id(app, "show", "Open Helm", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit Helm", true, None::<&str>)?;
