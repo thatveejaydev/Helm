@@ -5,6 +5,10 @@ export interface ShortcutCapture {
   error?: string;
 }
 
+export function isTypingShortcut(accelerator: string): boolean {
+  return /^(?:shift\+)?(?:[a-z0-9]|space|num[0-9]|[-=\[\]\\;'.,/`])$/i.test(accelerator);
+}
+
 export function captureShortcut(event: KeyboardEvent): ShortcutCapture | null {
   if (event.key === "Escape") {
     return null;

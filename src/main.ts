@@ -3,7 +3,7 @@ import { emitTo, listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { ApplyResult, BridgeSnapshot, CatalogItem, Effect, Preset, ProjectMedia, ProjectCatalogKey, ProjectCatalogReply, ProjectItemLookup, SequenceMarker } from "../shared/protocol";
 import { indexEffects, indexProjectMedia, mergeSearchResults, normalize, rankEffects, rankProjectMedia, score, type SearchEntry } from "./search";
-import { captureShortcut } from "./shortcut";
+import { captureShortcut, isTypingShortcut } from "./shortcut";
 import "./style.css";
 
 document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
@@ -136,6 +136,9 @@ function openEffectShortcutRecorder(): void {
   icon.className = `effect-icon ${shortcutEffect.kind}`;
   icon.textContent = { video: "ƒx", audio: "♫", action: "▱" }[shortcutEffect.kind];
   const current = effectShortcuts[shortcutEffect.id];
+  if (current && isTypingShortcut(current)) {
+    element("effect-shortcut-error").textContent = "This shortcut is paused so you can type in Premiere. Add Ctrl, Alt, or the Windows key to reassign it.";
+  }
   element("remove-effect-shortcut").hidden = !current;
   previewEffectShortcut(current ? current.split("+") : []);
   shortcutDialog.showModal();
@@ -479,7 +482,7 @@ function createResultRow(effect: PaletteItem, tree: boolean): HTMLButtonElement 
     : effect.kind === "action" && effect.shortcutId ? { ...effect, id: effect.shortcutId } : undefined;
   if (shortcutTarget) {
     const accelerator = effectShortcuts[shortcutTarget.id];
-    if (accelerator) {
+    if (accelerator && !isTypingShortcut(accelerator)) {
       const badge = document.createElement("kbd");
       badge.className = "effect-shortcut-badge";
       badge.textContent = accelerator.replaceAll("+", " + ");
@@ -873,10 +876,13 @@ document.addEventListener("keydown", async (event) => {
     if (savingEffectShortcut || event.repeat) return;
     const captured = captureShortcut(event);
     if (!captured) return;
-    pendingAccelerator = captured.complete && !captured.error ? captured.accelerator : "";
+    const error = captured.error || (isTypingShortcut(captured.accelerator)
+      ? "Add Ctrl, Alt, or the Windows key to keep this key available for typing in Premiere."
+      : "");
+    pendingAccelerator = captured.complete && !error ? captured.accelerator : "";
     saveEffectShortcut.disabled = !pendingAccelerator;
     previewEffectShortcut(captured.display ? captured.display.split(" + ") : []);
-    element("effect-shortcut-error").textContent = captured.error ?? "";
+    element("effect-shortcut-error").textContent = error;
     return;
   }
   if (!shortcutMenu.hidden && event.key === "Escape") {

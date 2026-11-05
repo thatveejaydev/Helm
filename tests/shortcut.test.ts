@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { captureShortcut } from "../src/shortcut";
+import { captureShortcut, isTypingShortcut } from "../src/shortcut";
+
+test("reserves typing keys for Premiere text entry", () => {
+  for (const shortcut of ["Shift+A", "Shift+T", "Shift+1", "Shift+/", "Shift+Space"]) {
+    assert.equal(isTypingShortcut(shortcut), true, shortcut);
+  }
+  for (const shortcut of ["Ctrl+Shift+A", "Alt+Shift+T", "Shift+F2", "Shift+Left"]) {
+    assert.equal(isTypingShortcut(shortcut), false, shortcut);
+  }
+});
 
 function mockKeyEvent(init: {
   key: string;
