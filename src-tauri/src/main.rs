@@ -3,6 +3,7 @@
 mod bridge;
 mod effect_shortcuts;
 mod platform;
+mod plugin_installer;
 #[cfg(windows)]
 mod preset_windows;
 mod presets;
@@ -308,6 +309,18 @@ fn reset_shortcut(
     set_shortcut(app, DEFAULT_SHORTCUT.to_string(), state)
 }
 
+#[tauri::command]
+fn get_premiere_plugin_status(app: tauri::AppHandle) -> plugin_installer::PluginStatus {
+    plugin_installer::check_plugin_status(&app)
+}
+
+#[tauri::command]
+async fn install_premiere_plugin(app: tauri::AppHandle) -> Result<plugin_installer::InstallResult, String> {
+    tauri::async_runtime::spawn_blocking(move || plugin_installer::install_plugin(&app))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
@@ -374,7 +387,9 @@ fn main() {
             get_presets,
             apply_preset,
             set_shortcut,
-            reset_shortcut
+            reset_shortcut,
+            get_premiere_plugin_status,
+            install_premiere_plugin
         ])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("palette") {

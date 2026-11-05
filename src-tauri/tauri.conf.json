@@ -35,6 +35,7 @@
       "focus": false,
       "focusable": false,
       "decorations": false,
+      "shadow": false,
       "closable": false,
       "minimizable": false,
       "maximizable": false,
@@ -54,6 +55,11 @@
     "targets": ["nsis"],
     "icon": ["icons/icon.ico"],
     "resources": { "../uxp/dist/": "premiere-plugin/" },
+    "windows": {
+      "nsis": {
+        "installerHooks": "installerHooks.nsi"
+      }
+    },
     "shortDescription": "Fast effect search for Premiere Pro"
   }
 }

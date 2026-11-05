@@ -160,17 +160,21 @@ fn publish_session(storage: &Path, session: &[u8]) {
         if !version.file_type().is_ok_and(|kind| kind.is_dir()) {
             continue;
         }
-        let directory = version.path().join("Developer/is.helm.palette.bridge/PluginData");
-        if !std::fs::symlink_metadata(&directory).is_ok_and(|meta| meta.is_dir()) {
-            continue;
-        }
-        let destination = directory.join("helm-session.json");
-        if std::fs::read(&destination).is_ok_and(|existing| existing == session) {
-            continue;
-        }
-        let temporary = directory.join(format!("helm-session-{}.tmp", uuid::Uuid::new_v4()));
-        if std::fs::write(&temporary, session).and_then(|()| std::fs::rename(&temporary, &destination)).is_err() {
-            let _ = std::fs::remove_file(temporary);
+        for channel in ["Developer", "External", "Shared"] {
+            let plugin_root = version.path().join(channel).join("is.helm.palette.bridge");
+            if !plugin_root.is_dir() {
+                continue;
+            }
+            let directory = plugin_root.join("PluginData");
+            let _ = std::fs::create_dir_all(&directory);
+            let destination = directory.join("helm-session.json");
+            if std::fs::read(&destination).is_ok_and(|existing| existing == session) {
+                continue;
+            }
+            let temporary = directory.join(format!("helm-session-{}.tmp", uuid::Uuid::new_v4()));
+            if std::fs::write(&temporary, session).and_then(|()| std::fs::rename(&temporary, &destination)).is_err() {
+                let _ = std::fs::remove_file(temporary);
+            }
         }
     }
 }

@@ -20,19 +20,52 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
     <div id="results" role="listbox" aria-label="Palette results"></div>
     <div id="empty" class="empty" hidden><span class="empty-symbol">⌕</span><h2 id="empty-title"></h2><p id="empty-message"></p><button id="setup-button" class="secondary" hidden>Connect to Premiere</button></div>
   </section>
-  <section id="settings" hidden>
-    <div class="section-heading"><span class="eyebrow">CONNECTION</span><h1>Meet your new shortcut.</h1><p>Helm connects automatically when Helm Bridge is loaded in Premiere.</p></div>
-    <ol class="setup-steps"><li><span>1</span><div>Load the Premiere plugin<small>In UXP Developer Tools, add <strong>uxp/dist/manifest.json</strong> and click Load.</small></div></li></ol>
-    <div class="shortcut-row"><span>Open while editing</span><div class="shortcut-controls"><button id="record-shortcut" class="shortcut-button" type="button" aria-label="Change shortcut" title="Click to record a new shortcut"><kbd id="shortcut">Ctrl + Alt + Space</kbd></button><button id="reset-shortcut" class="shortcut-reset" type="button" aria-label="Reset to default shortcut" title="Reset to default (Ctrl + Alt + Space)">↺</button></div></div>
-    <div class="settings-actions"><button id="back" class="secondary">Back to search</button><button id="refresh" class="primary">Refresh catalogs</button></div>
-    <div class="project-debug">
-      <label><input id="show-project-log" type="checkbox" /> Show Project debug log window</label>
-    </div>
+  <section id="settings" aria-labelledby="settings-title" hidden>
+    <button id="back" type="button"><span aria-hidden="true">←</span> Back to search</button>
+    <h1 id="settings-title">Settings</h1>
+    <section class="settings-group">
+      <h2>Premiere connection</h2>
+      <div class="settings-row">
+        <div>
+          <div class="plugin-install-status"><span id="plugin-status-dot" class="status-dot" aria-hidden="true"></span><span id="plugin-status-text">Checking plugin status…</span></div>
+          <p id="plugin-status-hint">Helm connects automatically when Premiere loads the bridge.</p>
+        </div>
+        <button id="install-plugin-btn" class="secondary" type="button">Install to Premiere</button>
+      </div>
+    </section>
+    <section class="settings-group">
+      <h2>Keyboard shortcut</h2>
+      <div class="settings-row">
+        <span>Open Helm while editing</span>
+        <div class="shortcut-controls"><button id="record-shortcut" class="shortcut-button" type="button" aria-label="Change shortcut" title="Click to record a new shortcut"><kbd id="shortcut">Ctrl + Alt + Space</kbd></button><button id="reset-shortcut" class="shortcut-reset" type="button" aria-label="Reset to default shortcut" title="Reset to default (Ctrl + Alt + Space)">↺</button></div>
+      </div>
+    </section>
+    <section class="settings-group">
+      <h2>Catalogs</h2>
+      <div class="settings-row">
+        <div>Refresh catalogs<p>Update the items available in search.</p></div>
+        <button id="refresh" class="primary" type="button" aria-label="Refresh catalogs">Refresh</button>
+      </div>
+    </section>
+    <section class="settings-group">
+      <h2>Diagnostics</h2>
+      <div class="settings-row">
+        <div><label for="show-project-log">Project debug log</label><p id="project-log-description">Show a separate window with project logs.</p></div>
+        <input id="show-project-log" type="checkbox" role="switch" aria-describedby="project-log-description" />
+      </div>
+    </section>
   </section>
   <footer id="palette-footer" data-tauri-drag-region hidden>
     <div class="brand"><span class="brand-mark">H</span> HELM <span id="connection" class="connection" role="img" aria-label="Connecting to Premiere"></span></div>
     <div class="footer-info"><span id="status" role="status">Ready when you are.</span></div>
-    <div class="footer-actions"><button id="settings-toggle" class="icon-button" aria-label="Connection settings" title="Connection settings">⚙</button></div>
+    <div class="footer-actions">
+      <button id="settings-toggle" class="icon-button" aria-label="Connection settings" title="Connection settings">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="m10 3-.7 2.3-2 .9-2.2-1-2 3.5 1.8 1.6v3.4l-1.8 1.6 2 3.5 2.2-1 2 .9L10 21h4l.7-2.3 2-.9 2.2 1 2-3.5-1.8-1.6v-3.4l1.8-1.6-2-3.5-2.2 1-2-.9L14 3z" />
+          <circle cx="12" cy="12" r="3" />
+        </svg>
+      </button>
+    </div>
   </footer>
   <button id="effect-shortcut-menu" class="effect-shortcut-menu" type="button" hidden>Assign shortcut…</button>
   <dialog id="effect-shortcut-dialog" aria-labelledby="effect-shortcut-name">
@@ -231,7 +264,12 @@ function openSettings(open: boolean): void {
   settingsOpen = open;
   element("palette").hidden = open;
   element("settings").hidden = !open;
+  element("settings-toggle").hidden = open;
   updatePaletteSize();
+  if (open) {
+    element("back").focus();
+    void refreshPluginStatus();
+  }
   if (!open) input.focus();
 }
 
@@ -962,6 +1000,81 @@ projectLogToggle.addEventListener("change", async () => {
     projectLogToggle.disabled = false;
   }
 });
+interface PluginStatus {
+  upia_available: boolean;
+  installed: boolean;
+  ccx_found: boolean;
+  message: string;
+}
+
+interface InstallResult {
+  success: boolean;
+  message: string;
+}
+
+async function refreshPluginStatus(): Promise<void> {
+  const dot = element("plugin-status-dot");
+  const text = element("plugin-status-text");
+  const hint = element("plugin-status-hint");
+  const btn = element<HTMLButtonElement>("install-plugin-btn");
+
+  try {
+    const status = await invoke<PluginStatus>("get_premiere_plugin_status");
+    if (status.installed) {
+      dot.className = "status-dot online";
+      text.textContent = "Installed in Premiere Pro";
+      hint.textContent = "Helm Bridge is registered. Open Window → UXP Plugins in Premiere.";
+      btn.textContent = "Reinstall Plugin";
+      btn.disabled = false;
+    } else if (status.upia_available) {
+      dot.className = "status-dot";
+      text.textContent = "Not installed in Premiere Pro";
+      hint.textContent = "Install Helm Bridge automatically with one click.";
+      btn.textContent = "Install to Premiere";
+      btn.disabled = false;
+    } else {
+      dot.className = "status-dot offline";
+      text.textContent = "Adobe UPIA not found";
+      hint.textContent = "Ensure Adobe Creative Cloud is installed, or use Developer Tools below.";
+      btn.textContent = "Install to Premiere";
+      btn.disabled = true;
+    }
+  } catch (e) {
+    console.error("Failed to check plugin status:", e);
+  }
+}
+
+async function handleInstallPlugin(): Promise<void> {
+  const btn = element<HTMLButtonElement>("install-plugin-btn");
+  const text = element("plugin-status-text");
+  const hint = element("plugin-status-hint");
+  const dot = element("plugin-status-dot");
+
+  btn.disabled = true;
+  btn.textContent = "Installing…";
+  text.textContent = "Installing into Premiere…";
+  hint.textContent = "Running Adobe Unified Plugin Installer Agent (UPIA)…";
+
+  try {
+    const res = await invoke<InstallResult>("install_premiere_plugin");
+    if (res.success) {
+      dot.className = "status-dot online";
+      text.textContent = "Installed successfully!";
+      hint.textContent = "Helm Bridge is installed in Premiere Pro. Open Premiere to use.";
+      btn.textContent = "Reinstall Plugin";
+      setStatus("Helm Bridge installed into Premiere Pro.");
+    }
+  } catch (err) {
+    dot.className = "status-dot offline";
+    text.textContent = "Installation failed";
+    hint.textContent = String(err);
+    btn.textContent = "Retry Install";
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+element("install-plugin-btn").addEventListener("click", () => void handleInstallPlugin());
 element("setup-button").addEventListener("click", () => openSettings(true));
 element("back").addEventListener("click", () => openSettings(false));
 element("record-shortcut").addEventListener("click", () => {
@@ -1046,6 +1159,7 @@ async function start(): Promise<void> {
   });
   update(await invoke<BridgeSnapshot>("get_snapshot"));
   effectShortcuts = await invoke<Record<string, string>>("get_effect_shortcuts");
+  void refreshPluginStatus();
   render();
   input.focus();
   await loadPresets("Startup");

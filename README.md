@@ -4,8 +4,15 @@ Helm is a keyboard palette for Premiere Pro 25.6 and later. Press **Ctrl + Alt +
 
 ## Set up on Windows
 
-Run `src-tauri/target/release/helm.exe` from the workspace, or use the installer under `src-tauri/target/release/bundle/nsis`. The built app requires WebView2. The Premiere integration loads through Adobe UXP Developer Tools.
+Run `src-tauri/target/release/helm.exe` from the workspace, or use the installer under `src-tauri/target/release/bundle/nsis`. The built app requires WebView2.
 
+### Automatic Bridge Installation (Recommended)
+1. Launch Helm and open **Settings** (⚙).
+2. Click **Install to Premiere** under the Premiere Plugin section. Helm automatically installs `helm-bridge.ccx` into Premiere Pro via Adobe's Unified Plugin Installer Agent (UPIA).
+3. If using the NSIS setup installer, Helm automatically installs the bridge during setup and removes it on uninstall.
+4. Open Premiere Pro and ensure the plugin is enabled under **Window → UXP Plugins → Helm Bridge**.
+
+### Manual Development Setup (UXP Developer Tools)
 1. Enable Developer Mode in **Premiere → Edit → Preferences → Plugins**, then restart Premiere if prompted. Open **Adobe UXP Developer Tools** and enable its Developer Mode if prompted.
 2. In UXP Developer Tools, choose **Add Plugin**, select `uxp\dist\manifest.json` from this folder, then choose **Load**. Open **Window → UXP Plugins → Helm Bridge** in Premiere.
 3. With Helm running and Helm Bridge loaded, wait for the desktop palette to show **Premiere connected**. Helm and the bridge connect automatically. Open the gear in Helm to customize your shortcut.
