@@ -7,7 +7,7 @@ button:focus-visible { outline: 2px solid #ad9bf4; outline-offset: -2px; }
 [hidden] { display: none !important; }
 #app { width: 100%; height: 100%; display: flex; flex-direction: column; border: 1px solid #34363a; background: #111113; }
 .brand { display: flex; align-items: center; gap: 9px; font-size: 11px; font-weight: 650; letter-spacing: 2px; pointer-events: none; }
-.brand-mark { display: grid; place-items: center; width: 23px; height: 23px; background: #b6a4f3; color: #201a30; font-size: 14px; border-radius: 5px; letter-spacing: 0; }
+.brand-mark { width: 23px; height: 23px; flex-shrink: 0; }
 .footer-actions { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
 .connection { width: 5px; height: 5px; border-radius: 50%; background: #737780; }
 .connection.online { background: #94c9a2; }

@@ -4,6 +4,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { ApplyResult, BridgeSnapshot, CatalogItem, Effect, Preset, ProjectMedia, ProjectCatalogKey, ProjectCatalogReply, ProjectItemLookup, SequenceMarker } from "../shared/protocol";
 import { indexEffects, indexProjectMedia, mergeSearchResults, normalize, rankEffects, rankProjectMedia, score, type SearchEntry } from "./search";
 import { captureShortcut, isTypingShortcut } from "./shortcut";
+import helmIcon from "../src-tauri/icons/icon.png";
 import "./style.css";
 
 document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
@@ -56,7 +57,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
     </section>
   </section>
   <footer id="palette-footer" data-tauri-drag-region hidden>
-    <div class="brand"><span class="brand-mark">H</span> HELM <span id="connection" class="connection" role="img" aria-label="Connecting to Premiere"></span></div>
+    <div class="brand"><img class="brand-mark" src="${helmIcon}" alt="" /> HELM <span id="connection" class="connection" role="img" aria-label="Connecting to Premiere"></span></div>
     <div class="footer-info"><span id="status" role="status">Ready when you are.</span></div>
     <div class="footer-actions">
       <button id="settings-toggle" class="icon-button" aria-label="Connection settings" title="Connection settings">
