@@ -28,7 +28,7 @@ function fixture(videoRanges: [number, number][][] = [[], []], circular = false)
   };
   const sequenceItem = { type: 2, name: "Edit", getId: () => "sequence" };
   const nestItem = { type: 3, name: "Review Cut", getId: () => "nest" };
-  const bin = { type: 1, name: "Interviews", getItems: async () => [media, nestItem] };
+  const bin = { type: 1, name: "Interviews", getId: () => "interviews", getItems: async () => [media, nestItem] };
   const playhead = { ticks: "100" };
   const sequence = {
     guid: "sequence", getProjectItem: async () => sequenceItem, getPlayerPosition: async () => playhead,
@@ -98,12 +98,13 @@ test("project search indexes media and sequences by name and bin path and exclud
   assert.ok("items" in catalog);
   assert.equal(catalog.projectId, "project");
   assert.deepEqual(searchProjectMedia(indexProjectMedia(catalog.items), "interviews cam b"), [
-    { id: "media", name: "Cam B 001.mov", bins: ["Interviews"], mediaType: "video" },
+    { id: "media", name: "Cam B 001.mov", bins: ["Interviews"], binIds: ["interviews"], mediaType: "video" },
   ]);
   assert.deepEqual(searchProjectMedia(indexProjectMedia(catalog.items), "edit"), []);
   assert.deepEqual(searchProjectMedia(indexProjectMedia(catalog.items), "interviews review"), [
-    { id: "nest", name: "Review Cut", bins: ["Interviews"], mediaType: "sequence" },
+    { id: "nest", name: "Review Cut", bins: ["Interviews"], binIds: ["interviews"], mediaType: "sequence" },
   ]);
+  assert.equal(searchProjectMedia(indexProjectMedia(catalog.items), "interviews")[0].mediaType, "bin");
 });
 
 test("project insert routes a sequence to a free track and rejects circular nesting", async () => {

@@ -18,6 +18,9 @@ use tauri::{
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 const DEFAULT_SHORTCUT: &str = "Ctrl+Alt+Space";
+const PALETTE_WIDTH: f64 = 640.0;
+const COMPACT_HEIGHT: f64 = 126.0;
+const EXPANDED_HEIGHT: f64 = 566.0;
 
 struct FocusTarget(AtomicIsize);
 
@@ -31,13 +34,14 @@ fn show_palette(app: &tauri::AppHandle, target: Option<isize>) {
     app.state::<FocusTarget>().0.store(target.unwrap_or(0), Ordering::Relaxed);
     let monitor = target
         .and_then(platform::window_center)
-        .and_then(|(x, y)| window.monitor_from_point(x.into(), y.into()).ok().flatten());
+        .and_then(|(x, y)| window.monitor_from_point(x.into(), y.into()).ok().flatten())
+        .or_else(|| window.current_monitor().ok().flatten());
     if let Some(monitor) = monitor {
         let p = monitor.position();
         let s = monitor.size();
         let scale = monitor.scale_factor();
-        let width = (640.0 * scale) as i32;
-        let height = (566.0 * scale) as i32;
+        let width = (PALETTE_WIDTH * scale) as i32;
+        let height = (EXPANDED_HEIGHT * scale) as i32;
         let _ = window.set_position(tauri::PhysicalPosition::new(
             p.x + (s.width as i32 - width) / 2,
             p.y + (s.height as i32 - height) / 2,
@@ -45,9 +49,17 @@ fn show_palette(app: &tauri::AppHandle, target: Option<isize>) {
     } else {
         let _ = window.center();
     }
+    let _ = window.set_size(tauri::LogicalSize::new(PALETTE_WIDTH, COMPACT_HEIGHT));
     let _ = window.show();
     let _ = window.set_focus();
     let _ = window.emit("palette-opened", ());
+}
+
+#[tauri::command]
+fn resize_palette(app: tauri::AppHandle, expanded: bool) -> Result<(), String> {
+    let window = app.get_webview_window("palette").ok_or("Helm's palette is unavailable.")?;
+    let height = if expanded { EXPANDED_HEIGHT } else { COMPACT_HEIGHT };
+    window.set_size(tauri::LogicalSize::new(PALETTE_WIDTH, height)).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -58,6 +70,34 @@ fn dismiss_palette(app: tauri::AppHandle, restore_focus: bool) {
         if restore_focus && was_focused {
             platform::restore_focus(app.state::<FocusTarget>().0.load(Ordering::Relaxed));
         }
+    }
+}
+
+#[tauri::command]
+async fn open_effect_controls(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let target = app.state::<FocusTarget>().0.load(Ordering::Relaxed);
+        let window = app.get_webview_window("palette").ok_or("Helm's palette is unavailable.")?;
+        if target == 0 || !window.is_focused().unwrap_or(false) {
+            return Err("Open Helm with its shortcut from Premiere to focus Effect Controls.".into());
+        }
+        window.hide().map_err(|error| error.to_string())?;
+        platform::restore_focus(target);
+        let result = tauri::async_runtime::spawn_blocking(move || preset_windows::effect_controls_shortcut(target))
+            .await
+            .map_err(|error| error.to_string())
+            .and_then(|result| result);
+        if result.is_err() && platform::foreground_premiere() == Some(target) {
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+        result
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        Err("Focusing Effect Controls is available on Windows.".into())
     }
 }
 
@@ -261,6 +301,8 @@ fn main() {
         .manage(presets::PresetLibrary::default())
         .invoke_handler(tauri::generate_handler![
             dismiss_palette,
+            resize_palette,
+            open_effect_controls,
             get_snapshot,
             apply_effect,
             refresh_catalog,

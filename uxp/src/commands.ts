@@ -23,12 +23,14 @@ async function* projectClips(
   folder: FolderItem,
   sequences: ReadonlyMap<string, Sequence>,
   bins: string[] = [],
-): AsyncGenerator<{ item: ProjectItem; bins: string[] }> {
+  binIds: string[] = [],
+): AsyncGenerator<{ item: ProjectItem; bins: string[]; binIds: string[] }> {
   for (const item of await folder.getItems()) {
     if (item.type === ppro.ProjectItem.TYPE_BIN) {
-      yield* projectClips(ppro, ppro.FolderItem.cast(item), sequences, [...bins, item.name]);
+      yield { item, bins, binIds };
+      yield* projectClips(ppro, ppro.FolderItem.cast(item), sequences, [...bins, item.name], [...binIds, item.getId()]);
     } else if (item.type === ppro.ProjectItem.TYPE_CLIP || sequences.has(item.getId())) {
-      yield { item, bins };
+      yield { item, bins, binIds };
     }
   }
 }
@@ -71,12 +73,16 @@ async function listProjectMedia(ppro: premierepro): Promise<ProjectMediaCatalog>
   const sequences = await projectSequences(project);
   const active = await project.getActiveSequence();
   const items: ProjectMediaCatalog["items"] = [];
-  for await (const { item, bins } of projectClips(ppro, await project.getRootItem(), sequences)) {
+  for await (const { item, bins, binIds } of projectClips(ppro, await project.getRootItem(), sequences)) {
     const id = item.getId();
+    if (item.type === ppro.ProjectItem.TYPE_BIN) {
+      items.push({ id, name: item.name, bins, binIds, mediaType: "bin" });
+      continue;
+    }
     const sequence = sequences.get(id);
     if (sequence) {
       if (sequence.guid.toString() !== active?.guid.toString()) {
-        items.push({ id, name: item.name, bins, mediaType: "sequence" });
+        items.push({ id, name: item.name, bins, binIds, mediaType: "sequence" });
       }
       continue;
     }
@@ -91,7 +97,7 @@ async function listProjectMedia(ppro: premierepro): Promise<ProjectMediaCatalog>
     } catch {
       // Unavailable media metadata should not hide a searchable project item.
     }
-    items.push({ id, name: item.name, bins, mediaType });
+    items.push({ id, name: item.name, bins, binIds, mediaType });
   }
   return { projectId: project.guid.toString(), items };
 }
@@ -104,7 +110,7 @@ async function openProjectSource(ppro: premierepro, value: unknown) {
   }
   const sequences = await projectSequences(project);
   for await (const { item } of projectClips(ppro, await project.getRootItem(), sequences)) {
-    if (item.getId() !== selection.id) continue;
+    if (item.type === ppro.ProjectItem.TYPE_BIN || item.getId() !== selection.id) continue;
     const sequence = sequences.get(selection.id);
     if (!sequence && await ppro.ClipProjectItem.cast(item).isOffline()) {
       throw new Error("Relink this clip in Premiere before opening it.");
@@ -164,7 +170,7 @@ async function insertProjectMedia(ppro: premierepro, value: unknown) {
   }
   const sequences = await projectSequences(project);
   for await (const { item } of projectClips(ppro, await project.getRootItem(), sequences)) {
-    if (item.getId() !== selection.id) continue;
+    if (item.type === ppro.ProjectItem.TYPE_BIN || item.getId() !== selection.id) continue;
     const sourceSequence = sequences.get(selection.id);
     const clip = sourceSequence ? undefined : ppro.ClipProjectItem.cast(item);
     if (sourceSequence) await checkNesting(ppro, sourceSequence, sequence, sequences);

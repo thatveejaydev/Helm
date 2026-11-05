@@ -57,7 +57,8 @@ export interface SequenceMarker {
 }
 
 export interface ProjectMedia {
-  mediaType?: "video" | "audio" | "image" | "generated" | "sequence" | "other";
+  mediaType?: "video" | "audio" | "image" | "generated" | "sequence" | "bin" | "other";
+  binIds?: string[];
   id: string;
   name: string;
   bins: string[];

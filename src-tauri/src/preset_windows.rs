@@ -40,6 +40,26 @@ pub fn attributes_shortcut(target: isize, paste: bool) -> Result<(), String> {
     inject(&input)
 }
 
+pub fn effect_controls_shortcut(target: isize) -> Result<(), String> {
+    let modifiers = [VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN];
+    for _ in 0..40 {
+        let released = modifiers.iter().all(|modifier| unsafe {
+            GetAsyncKeyState(i32::from(modifier.0)) >= 0
+        });
+        if released && crate::platform::foreground_premiere() == Some(target) {
+            let down = KEYBD_EVENT_FLAGS(0);
+            return inject(&[
+                key(VK_SHIFT, 0, down),
+                key(VK_5, 0, down),
+                key(VK_5, 0, KEYEVENTF_KEYUP),
+                key(VK_SHIFT, 0, KEYEVENTF_KEYUP),
+            ]);
+        }
+        sleep(Duration::from_millis(20));
+    }
+    Err("Premiere did not regain focus or a modifier key was still held.".into())
+}
+
 pub fn reveal(window: isize, preset: &Preset) -> Result<(), String> {
     unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok() }
         .map_err(|error| format!("Could not initialize Windows accessibility: {error}"))?;

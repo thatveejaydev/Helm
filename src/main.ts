@@ -25,7 +25,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
     <div class="shortcut-row"><span>Open while editing</span><div class="shortcut-controls"><button id="record-shortcut" class="shortcut-button" type="button" aria-label="Change shortcut" title="Click to record a new shortcut"><kbd id="shortcut">Ctrl + Alt + Space</kbd></button><button id="reset-shortcut" class="shortcut-reset" type="button" aria-label="Reset to default shortcut" title="Reset to default (Ctrl + Alt + Space)">↺</button></div></div>
     <div class="settings-actions"><button id="back" class="secondary">Back to search</button><button id="refresh" class="primary">Refresh effects and presets</button></div>
   </section>
-  <footer data-tauri-drag-region>
+  <footer id="palette-footer" data-tauri-drag-region hidden>
     <div class="brand"><span class="brand-mark">H</span> HELM</div>
     <div class="footer-info"><span id="status" role="status">Ready when you are.</span></div>
     <div class="footer-actions"><span id="connection" class="connection">Connecting</span><button id="settings-toggle" class="icon-button" aria-label="Connection settings" title="Connection settings">⚙</button></div>
@@ -63,6 +63,7 @@ let visible: PaletteItem[] = [];
 const searchModes = ["all", "effects", "project", "commands"] as const;
 type SearchMode = typeof searchModes[number];
 let searchMode: SearchMode = "all";
+let binStack: ProjectMedia[] = [];
 let projectId: string | undefined;
 let projectIndex: ReturnType<typeof indexProjectMedia> = [];
 let projectLoading = false;
@@ -74,8 +75,6 @@ let busy = false;
 let settingsOpen = false;
 let composing = false;
 let recordingShortcut = false;
-let recent: string[] = [];
-try { recent = JSON.parse(localStorage.getItem("helm-recent") || "[]").filter((id: unknown) => typeof id === "string").slice(0, 30); } catch { /* Start with an empty history if storage is unavailable. */ }
 
 function setStatus(message: string, error = false): void {
   element("status").textContent = message;
@@ -97,11 +96,25 @@ function stopRecordingShortcut(): void {
   }
 }
 
+let expanded = false;
+let resizePending = Promise.resolve();
+
+function updatePaletteSize(): void {
+  const next = settingsOpen || Boolean(input.value.trim());
+  element("palette-footer").hidden = !next;
+  if (expanded === next) return;
+  expanded = next;
+  resizePending = resizePending
+    .then(() => invoke<void>("resize_palette", { expanded: next }))
+    .catch((error) => { console.error("Could not resize Helm:", error); });
+}
+
 function openSettings(open: boolean): void {
   if (!open && recordingShortcut) stopRecordingShortcut();
   settingsOpen = open;
   element("palette").hidden = open;
   element("settings").hidden = !open;
+  updatePaletteSize();
   if (!open) input.focus();
 }
 
@@ -145,12 +158,27 @@ function projectQuery(query: string) {
 function render(): void {
   const query = input.value;
   const currentProject = projectId;
-  const limit = query.trim() ? 60 : 9;
+  const bin = binStack.at(-1);
+  const hasQuery = Boolean(query.trim());
+  updatePaletteSize();
+  element("insert-hint").hidden = searchMode !== "project" || (!hasQuery && !bin);
+  element("insert-hint").textContent = bin
+    ? `${[...bin.bins, bin.name].join(" › ")} · Esc to go back`
+    : "Enter inserts · Shift+Enter opens item · v2: a2: prefers tracks";
+  if (!hasQuery) {
+    visible = [];
+    selected = 0;
+    results.replaceChildren();
+    input.removeAttribute("aria-activedescendant");
+    element("empty").hidden = true;
+    return;
+  }
+  const limit = 60;
   const projectResults = (searchMode === "all" || searchMode === "project") && currentProject !== undefined
-    ? rankProjectMedia(projectIndex, projectQuery(query).search, limit)
+    ? rankProjectMedia(bin ? projectIndex.filter(({ item }) => item.binIds?.includes(bin.id)) : projectIndex, projectQuery(query).search, limit)
       .map(({ item, rank }) => ({ item: { ...item, kind: "project" as const, projectId: currentProject }, rank })) : [];
   const effectResults = searchMode === "all" || searchMode === "effects"
-    ? rankEffects(index, query, "all", recent, limit) : [];
+    ? rankEffects(index, query, "all", [], limit) : [];
   const commandResults = searchMode === "all" || searchMode === "commands" ? matchingCommands(query) : [];
   if (searchMode === "all") {
     const markerSearch = markers && /^go to marker(?:\s|$)/i.test(query.trimStart());
@@ -181,8 +209,8 @@ function render(): void {
     if (effect.kind === "project") {
       const mediaType = effect.mediaType ?? "other";
       icon.classList.add(`media-${mediaType}`);
-      icon.textContent = { video: "▶", audio: "♫", image: "▧", generated: "◈", sequence: "▣", other: "▤" }[mediaType];
-      icon.title = { video: "Video", audio: "Audio", image: "Image", generated: "Generated media", sequence: "Sequence", other: "Project media" }[mediaType];
+      icon.textContent = { video: "▶", audio: "♫", image: "▧", generated: "◈", sequence: "▣", bin: "▱", other: "▤" }[mediaType];
+      icon.title = { video: "Video", audio: "Audio", image: "Image", generated: "Generated media", sequence: "Sequence", bin: "Bin", other: "Project media" }[mediaType];
     }
     const name = document.createElement("span");
     name.className = "effect-name";
@@ -196,6 +224,7 @@ function render(): void {
     } else if (effect.kind === "project") {
       type.textContent = effect.bins.join(" › ") || "Project root";
       if (effect.mediaType === "sequence") type.textContent = `Sequence · ${type.textContent}`;
+      if (effect.mediaType === "bin") type.textContent = `Bin · ${type.textContent}`;
       row.title = `${type.textContent} › ${effect.name}`;
     } else if (effect.kind === "command") {
       type.textContent = effect.description;
@@ -251,12 +280,12 @@ function setSearchMode(mode: SearchMode): void {
   searchMode = mode;
   selected = 0;
   markers = undefined;
-  input.placeholder = { all: "Search effects, project media, and commands…", effects: "Find an effect or preset…", project: "Find imported media by name or bin…", commands: "Find a command…" }[mode];
+  binStack = [];
+  input.placeholder = { all: "Search effects, project media, and commands…", effects: "Find an effect or preset…", project: "Find media, sequences, or bins…", commands: "Find a command…" }[mode];
   input.setAttribute("aria-label", input.placeholder);
   for (const option of searchModes) {
     element(`${option}-mode`).setAttribute("aria-pressed", String(option === mode));
   }
-  element("insert-hint").hidden = mode !== "project";
   render();
   if (mode === "project" || mode === "all") void loadProjectMedia();
 }
@@ -302,18 +331,27 @@ async function runCommand(command: CommandItem): Promise<void> {
   if (!result.native) await invoke("dismiss_palette", { restoreFocus: true });
 }
 
-async function apply(effect: PaletteItem, openSource = false): Promise<void> {
+async function apply(effect: PaletteItem, alternate = false): Promise<void> {
   if (busy) return;
   if (!snapshot?.connected) { setStatus("Connect the Helm panel in Premiere first.", true); return; }
+  if (effect.kind === "project" && effect.mediaType === "bin") {
+    input.value = "";
+    if (searchMode !== "project") setSearchMode("project");
+    binStack.push(effect);
+    selected = 0;
+    render();
+    input.focus();
+    return;
+  }
   busy = true;
   document.body.classList.add("busy");
   const isRevealPreset = effect.kind === "preset" && !effect.directApply;
-  setStatus(effect.kind === "project" ? `${openSource ? "Opening" : "Inserting"} ${effect.name}…` :
+  setStatus(effect.kind === "project" ? `${alternate ? "Opening" : "Inserting"} ${effect.name}…` :
     isRevealPreset ? `Locating ${effect.name}…` : `Applying ${effect.name}…`);
   try {
     if (effect.kind === "project") {
       const result = await invoke<{ message: string }>("run_palette_command", {
-        action: openSource ? "open-project-source" : "insert-project-media",
+        action: alternate ? "open-project-source" : "insert-project-media",
         value: { projectId: effect.projectId, id: effect.id, ...projectQuery(input.value).tracks },
       });
       setStatus(result.message);
@@ -335,10 +373,16 @@ async function apply(effect: PaletteItem, openSource = false): Promise<void> {
     } else {
       const result = await invoke<ApplyResult>("apply_effect", { effectId: effect.id });
       setStatus(`Applied to ${result.applied} clip${result.applied === 1 ? "" : "s"}${result.skipped ? ` · ${result.skipped} incompatible skipped` : ""}`);
-      await invoke("dismiss_palette", { restoreFocus: true });
+      if (alternate) {
+        try {
+          await invoke("open_effect_controls");
+        } catch (error) {
+          setStatus(`Applied ${effect.name}. Could not open Effect Controls. ${error}`, true);
+        }
+      } else {
+        await invoke("dismiss_palette", { restoreFocus: true });
+      }
     }
-    recent = [effect.id, ...recent.filter((id) => id !== effect.id)].slice(0, 30);
-    try { localStorage.setItem("helm-recent", JSON.stringify(recent)); } catch { /* History is optional. */ }
   } catch (error) {
     setStatus(String(error), true);
   } finally {
@@ -429,10 +473,22 @@ document.addEventListener("keydown", async (event) => {
   }
 
   if (event.isComposing || composing) return;
+  if (event.key === "," && event.ctrlKey && !event.altKey && !event.shiftKey && !event.metaKey && !busy) {
+    event.preventDefault();
+    if (!event.repeat) openSettings(!settingsOpen);
+    return;
+  }
   if (event.key === "Escape") {
     event.preventDefault();
     if (settingsOpen) openSettings(false);
+    else if (!busy && binStack.length) {
+      binStack.pop();
+      input.value = "";
+      selected = 0;
+      render();
+    }
     else if (!busy) void invoke("dismiss_palette", { restoreFocus: true });
+    return;
   }
   if (settingsOpen || busy) return;
   if (event.key === "Tab" && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey &&
@@ -447,8 +503,7 @@ document.addEventListener("keydown", async (event) => {
   }
   if (event.key === "Enter" && event.target === input && visible[selected]) {
     event.preventDefault();
-    const item = visible[selected];
-    void apply(item, event.shiftKey && item.kind === "project");
+    if (!event.repeat) void apply(visible[selected], event.shiftKey);
   }
 });
 
