@@ -1,0 +1,28 @@
+{
+  "name": "helm",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "npm run check && vite build && npm run build:uxp",
+    "check": "tsc --noEmit && tsc -p uxp/tsconfig.json --noEmit",
+    "build:uxp": "node scripts/build-uxp.mjs",
+    "tauri": "node scripts/tauri.mjs",
+    "desktop": "npm run tauri -- dev",
+    "package": "npm run tauri -- build",
+    "test": "node --import tsx --test tests/*.test.ts"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0"
+  },
+  "devDependencies": {
+    "@adobe/premierepro": "^26.0.0",
+    "@tauri-apps/cli": "^2.0.0",
+    "@types/node": "^24.0.0",
+    "esbuild": "^0.25.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0",
+    "vite": "^7.0.0"
+  }
+}

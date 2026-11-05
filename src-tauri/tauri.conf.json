@@ -1,0 +1,42 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Helm",
+  "version": "0.1.0",
+  "identifier": "is.helm.palette",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [{
+      "label": "palette",
+      "title": "Helm",
+      "width": 640,
+      "height": 566,
+      "resizable": false,
+      "maximizable": false,
+      "decorations": false,
+      "transparent": false,
+      "shadow": false,
+      "alwaysOnTop": true,
+      "skipTaskbar": true,
+      "visible": true,
+      "center": true,
+      "backgroundColor": "#151719"
+    }],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data:; connect-src ipc: http://ipc.localhost",
+      "devCsp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data:; connect-src ipc: http://ipc.localhost ws://127.0.0.1:1420"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "useLocalToolsDir": true,
+    "targets": ["nsis"],
+    "icon": ["icons/icon.ico"],
+    "resources": { "../uxp/dist/": "premiere-plugin/" },
+    "shortDescription": "Fast effect search for Premiere Pro"
+  }
+}
