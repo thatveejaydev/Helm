@@ -196,7 +196,7 @@ async fn run_palette_command(
             state.request("project-catalog", serde_json::json!({ "value": value })).await
         }
         "remove-attributes" | "set-opacity" | "set-volume" | "add-marker" | "list-markers" | "go-to-marker"
-        | "insert-project-media" | "open-project-source" => {
+        | "insert-project-media" | "open-project-source" | "set-adjustment-layer-source" | "add-adjustment-layer" => {
             state.request("palette-command", serde_json::json!({ "action": action, "value": value })).await
         }
         _ => Err("Unsupported Helm command.".into()),
@@ -336,7 +336,12 @@ fn main() {
                             if !platform::foreground_premiere().is_some_and(|window| window != 0) {
                                 return;
                             }
-                            if let Err(error) = bridge.request("apply", serde_json::json!({ "effectId": effect_id })).await {
+                            let result = if effect_id == "command:add-adjustment-layer" {
+                                bridge.request("palette-command", serde_json::json!({ "action": "add-adjustment-layer" })).await
+                            } else {
+                                bridge.request("apply", serde_json::json!({ "effectId": effect_id })).await
+                            };
+                            if let Err(error) = result {
                                 let _ = app.emit("effect-shortcut-error", error);
                             }
                         });

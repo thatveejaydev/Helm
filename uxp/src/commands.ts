@@ -187,29 +187,160 @@ async function availableTrack(
   preferred: number | undefined,
   start: bigint,
   duration: bigint,
+  firstTrack = 0,
+  allowNewTrack = false,
 ): Promise<number> {
   const video = media === "video";
   const count = await (video ? sequence.getVideoTrackCount() : sequence.getAudioTrackCount());
-  if (count === 0) return 0;
-  const order = Array.from({ length: count }, (_, index) => index).filter((index) => index !== preferred);
+  if (count === 0 && firstTrack === 0) return 0;
+  const order = Array.from({ length: Math.max(0, count - firstTrack) }, (_, index) => firstTrack + index)
+    .filter((index) => index !== preferred);
   if (preferred !== undefined && preferred < count) order.unshift(preferred);
-  const end = start + duration;
   for (const index of order) {
     const track: VideoTrack | AudioTrack = await (video ? sequence.getVideoTrack(index) : sequence.getAudioTrack(index));
-    const items = [
-      ...(track.getTrackItems(ppro.Constants.TrackItemType.CLIP, false) ?? []),
-      ...(track.getTrackItems(ppro.Constants.TrackItemType.TRANSITION, false) ?? []),
-    ].filter((item) => item != null);
-    if (duration <= 0n && items.length) continue;
-    const occupied = await Promise.all(items.map(async (item) => {
-      if (typeof item.getStartTime !== "function" || typeof item.getEndTime !== "function") return true;
-      const [inPoint, outPoint] = await Promise.all([item.getStartTime(), item.getEndTime()]);
-      if (!inPoint || !outPoint) return true;
-      return BigInt(inPoint.ticks) < end && BigInt(outPoint.ticks) > start;
-    }));
-    if (!occupied.some(Boolean)) return index;
+    if (await trackHasRoom(ppro, track, start, duration)) return index;
   }
+  if (allowNewTrack) return count;
+  if (firstTrack > 0) throw new Error("No video track above the selected clip has enough room. Add a video track above it.");
   throw new Error(`No ${media} track has enough room at the playhead. Add a track or move the playhead.`);
+}
+
+async function trackHasRoom(ppro: premierepro, track: VideoTrack | AudioTrack, start: bigint, duration?: bigint) {
+  const items = [
+    ...(track.getTrackItems(ppro.Constants.TrackItemType.CLIP, false) ?? []),
+    ...(track.getTrackItems(ppro.Constants.TrackItemType.TRANSITION, false) ?? []),
+  ].filter((item) => item != null);
+  if (duration !== undefined && duration <= 0n) return items.length === 0;
+  const end = duration === undefined ? undefined : start + duration;
+  const occupied = await Promise.all(items.map(async (item) => {
+    if (typeof item.getStartTime !== "function" || typeof item.getEndTime !== "function") return true;
+    const [inPoint, outPoint] = await Promise.all([item.getStartTime(), item.getEndTime()]);
+    if (!inPoint || !outPoint) return true;
+    return (end === undefined || BigInt(inPoint.ticks) < end) && BigInt(outPoint.ticks) > start;
+  }));
+  return !occupied.some(Boolean);
+}
+
+async function adjustmentLayerCommand(ppro: premierepro, configure: boolean) {
+  const { project, sequence, clips } = await selectedClips(ppro);
+  const videoClips = clips.filter((clip) => isVideo(ppro, clip));
+  if (!videoClips.length) throw new Error("Select at least one video clip in the timeline.");
+  const projectId = project.guid.toString();
+  const sourceKey = `helm-adjustment-layer:${projectId}`;
+  if (configure) {
+    if (videoClips.length !== 1) throw new Error("Select exactly one adjustment layer as the source.");
+    const target = videoClips[0];
+    if (!await target.isAdjustmentLayer()) throw new Error("Select an adjustment layer in the timeline to use as the source.");
+    const item = await target.getProjectItem();
+    localStorage.setItem(sourceKey, item.getId());
+    return { message: `Set ${item.name} as this project's adjustment layer source.` };
+  }
+  const sourceId = localStorage.getItem(sourceKey);
+  if (!sourceId) throw new Error("Run Set Adjustment Layer Source in Commands for this project first.");
+  const { item } = await findProjectItem(ppro, project, sourceId);
+  const spans = await Promise.all(videoClips.map(async (clip) => {
+    const [start, end, track] = await Promise.all([clip.getStartTime(), clip.getEndTime(), clip.getTrackIndex()]);
+    return { start, end, track };
+  }));
+  const start = spans.reduce((first, span) => BigInt(span.start.ticks) < BigInt(first.ticks) ? span.start : first, spans[0].start);
+  const end = spans.reduce((last, span) => BigInt(span.end.ticks) > BigInt(last.ticks) ? span.end : last, spans[0].end);
+  const targetTrack = Math.max(...spans.map(({ track }) => track));
+  const startTicks = BigInt(start.ticks);
+  const duration = BigInt(end.ticks) - startTicks;
+  if (duration <= 0n) throw new Error("The selected clip has no duration.");
+  const video = ppro.Constants.MediaType.VIDEO;
+  const trackIndex = await availableTrack(ppro, sequence, "video", undefined, startTicks, duration, targetTrack + 1, true);
+  const newTrack = trackIndex === await sequence.getVideoTrackCount();
+  const existingTrack = newTrack ? undefined : await sequence.getVideoTrack(trackIndex);
+  const active = await activeTimeline(ppro);
+  if (active.project.guid.toString() !== projectId || active.sequence.guid.toString() !== sequence.guid.toString()) {
+    throw new Error("The active timeline changed. Try again.");
+  }
+  const editor = ppro.SequenceEditor.getEditor(sequence);
+  const clipType = ppro.Constants.TrackItemType.CLIP;
+  const findLayer = async (track: VideoTrack, ticks: string) => {
+    const candidates = await Promise.all((track.getTrackItems(clipType, false) ?? []).filter(Boolean).map(async (clip) => {
+      const position = await clip.getStartTime();
+      return position?.ticks === ticks && (await clip.getProjectItem())?.getId() === sourceId ? clip : undefined;
+    }));
+    const matches = candidates.filter((clip) => clip !== undefined);
+    return matches.length === 1 ? matches[0] : undefined;
+  };
+  const removeLayer = (layer: NonNullable<Awaited<ReturnType<typeof findLayer>>>) => {
+    let action: Action | undefined;
+    ppro.TrackItemSelection.createEmptySelection((selection) => {
+      if (selection.addItem(layer)) action = editor.createRemoveItemsAction(selection, false, video, false);
+    });
+    if (!action) throw new Error("Could not select the prepared layer for removal.");
+    return action;
+  };
+  const message = { message: `Added a matching adjustment layer on V${trackIndex + 1}.` };
+  const source = ppro.ClipProjectItem.cast(item);
+  const [sourceIn, sourceOut] = await Promise.all([source.getInPoint(video), source.getOutPoint(video)]).catch(() => []);
+  // Generated media can ignore source marks. Only try a direct overwrite when no later edit is at risk.
+  if (existingTrack && sourceIn && sourceOut && BigInt(sourceOut.ticks) > BigInt(sourceIn.ticks) &&
+      await trackHasRoom(ppro, existingTrack, startTicks)) {
+    const sourceEnd = ppro.TickTime.createWithTicks(String(BigInt(sourceIn.ticks) + duration));
+    const needsMarks = sourceEnd.ticks !== sourceOut.ticks;
+    let inserted = false;
+    if (needsMarks) commit(project, "Set adjustment layer source duration", () => [source.createSetInOutPointsAction(sourceIn, sourceEnd)]);
+    try {
+      const [markedIn, markedOut] = await Promise.all([source.getInPoint(video), source.getOutPoint(video)]);
+      if (markedIn?.ticks === sourceIn.ticks && markedOut?.ticks === sourceEnd.ticks &&
+          await trackHasRoom(ppro, existingTrack, startTicks)) {
+        const current = await activeTimeline(ppro);
+        if (current.project.guid.toString() !== projectId || current.sequence.guid.toString() !== sequence.guid.toString()) {
+          throw new Error("The active timeline changed. Try again.");
+        }
+        commit(project, "Place adjustment layer above clips", () => [editor.createOverwriteItemAction(item, start, trackIndex, 0)]);
+        inserted = true;
+      }
+    } finally {
+      if (needsMarks) commit(project, "Restore adjustment layer source marks", () => [source.createSetInOutPointsAction(sourceIn, sourceOut)]);
+    }
+    if (inserted) {
+      const layer = await findLayer(existingTrack, start.ticks);
+      if (!layer) throw new Error("Could not identify the placed layer. Check the timeline before retrying.");
+      if ((await layer.getEndTime()).ticks === end.ticks) return message;
+      commit(project, "Remove unmatched adjustment layer", () => [removeLayer(layer)]);
+    }
+  }
+  // Prepare the exact length away from existing edits when direct placement is unsafe.
+  const insertStart = await sequence.getEndTime();
+  const insertTicks = BigInt(insertStart.ticks);
+  if (insertTicks < BigInt(end.ticks)) throw new Error("The sequence end changed. Try again.");
+  const trimEnd = ppro.TickTime.createWithTicks(String(insertTicks + duration));
+  // Premiere creates the track when the insert targets the next unused index.
+  commit(project, "Prepare adjustment layer", () => [editor.createInsertProjectItemAction(item, insertStart, trackIndex, 0, true)]);
+  const track = existingTrack ?? await sequence.getVideoTrack(trackIndex);
+  const layer = await findLayer(track, insertStart.ticks);
+  if (!layer) throw new Error("Could not identify the prepared layer. Check the timeline and undo the insert before retrying.");
+  try {
+    if ((await layer.getEndTime()).ticks !== trimEnd.ticks) {
+      commit(project, "Match adjustment layer duration", () => [layer.createSetEndAction(trimEnd)]);
+    }
+    if ((await layer.getStartTime()).ticks !== insertStart.ticks || (await layer.getEndTime()).ticks !== trimEnd.ticks) {
+      throw new Error("Premiere could not match the clip's duration.");
+    }
+    if (!await trackHasRoom(ppro, track, startTicks, duration)) throw new Error("The destination track is no longer free.");
+    const offset = ppro.TickTime.createWithTicks(String(startTicks - insertTicks));
+    commit(project, "Place adjustment layer above clip", () => [
+      editor.createCloneTrackItemAction(layer, offset, 0, 0, true, false),
+      removeLayer(layer),
+    ]);
+  } catch (error) {
+    try {
+      if (await findLayer(track, insertStart.ticks)) commit(project, "Remove prepared adjustment layer", () => [removeLayer(layer)]);
+    } catch {
+      throw new Error("Premiere could not match or remove the adjustment layer. Check the timeline before retrying.");
+    }
+    throw error;
+  }
+  const placed = await findLayer(track, start.ticks);
+  if (!placed || (await placed.getEndTime()).ticks !== end.ticks) {
+    throw new Error("Premiere did not place the layer at the expected time. Check the timeline and undo placement before retrying.");
+  }
+  return message;
 }
 
 async function insertProjectMedia(ppro: premierepro, value: unknown) {
@@ -327,6 +458,9 @@ async function editClips(ppro: premierepro, command: string, value: unknown) {
 
 export async function runCommand(ppro: premierepro, command: unknown, value: unknown) {
   switch (command) {
+    case "set-adjustment-layer-source":
+    case "add-adjustment-layer":
+      return adjustmentLayerCommand(ppro, command === "set-adjustment-layer-source");
     case "list-project-media":
       return listProjectMedia(ppro);
     case "insert-project-media":

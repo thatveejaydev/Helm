@@ -14,6 +14,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
       <button id="effects-mode" type="button" aria-pressed="false">Effects</button>
       <button id="project-mode" type="button" aria-pressed="false" title="Press Tab from an empty search to switch modes, or type project:">Project</button>
       <button id="actions-mode" type="button" aria-pressed="false">Actions</button>
+      <button id="commands-mode" type="button" aria-pressed="false">Commands</button>
       <span id="insert-hint" hidden>Enter inserts · Shift+Enter opens item · v2: a2: prefers tracks</span>
     </div>
     <div id="results" role="listbox" aria-label="Palette results"></div>
@@ -37,7 +38,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
   <dialog id="effect-shortcut-dialog" aria-labelledby="effect-shortcut-name">
     <div class="shortcut-dialog-heading">
       <span id="effect-shortcut-icon" class="effect-icon video" aria-hidden="true">ƒx</span>
-      <div><div class="eyebrow">EFFECT SHORTCUT</div><h2 id="effect-shortcut-name"></h2></div>
+      <div><div id="shortcut-dialog-label" class="eyebrow">EFFECT SHORTCUT</div><h2 id="effect-shortcut-name"></h2></div>
     </div>
     <div id="effect-shortcut-keys" class="shortcut-key-preview" aria-live="polite"></div>
     <p class="shortcut-warning">This combination may override a Premiere shortcut. Windows reserves it while Helm is running.</p>
@@ -59,7 +60,8 @@ const results = element<HTMLDivElement>("results");
 let snapshot: BridgeSnapshot | undefined;
 let index: SearchEntry[] = [];
 let effectShortcuts: Record<string, string> = {};
-let shortcutEffect: Effect | undefined;
+type ShortcutTarget = Pick<Effect, "id" | "name"> & { kind: Effect["kind"] | "action" };
+let shortcutEffect: ShortcutTarget | undefined;
 let pendingAccelerator = "";
 let savingEffectShortcut = false;
 const shortcutMenu = element<HTMLButtonElement>("effect-shortcut-menu");
@@ -77,7 +79,7 @@ function previewEffectShortcut(parts: string[]): void {
   }
 }
 
-function showEffectShortcutMenu(effect: Effect, event: MouseEvent): void {
+function showEffectShortcutMenu(effect: ShortcutTarget, event: MouseEvent): void {
   event.preventDefault();
   if (busy) return;
   shortcutEffect = effect;
@@ -96,9 +98,10 @@ function openEffectShortcutRecorder(): void {
   saveEffectShortcut.disabled = true;
   element("effect-shortcut-error").textContent = "";
   element("effect-shortcut-name").textContent = shortcutEffect.name;
+  element("shortcut-dialog-label").textContent = shortcutEffect.kind === "action" ? "COMMAND SHORTCUT" : "EFFECT SHORTCUT";
   const icon = element("effect-shortcut-icon");
   icon.className = `effect-icon ${shortcutEffect.kind}`;
-  icon.textContent = shortcutEffect.kind === "video" ? "ƒx" : "♫";
+  icon.textContent = { video: "ƒx", audio: "♫", action: "▱" }[shortcutEffect.kind];
   const current = effectShortcuts[shortcutEffect.id];
   element("remove-effect-shortcut").hidden = !current;
   previewEffectShortcut(current ? current.split("+") : []);
@@ -118,7 +121,7 @@ async function updateEffectShortcut(shortcut: string | null): Promise<void> {
     });
     shortcutDialog.close();
     render();
-    setStatus(shortcut ? "Effect shortcut saved." : "Effect shortcut removed.");
+    setStatus(shortcut ? "Shortcut saved." : "Shortcut removed.");
   } catch (error) {
     element("effect-shortcut-error").textContent = String(error);
   } finally {
@@ -127,6 +130,7 @@ async function updateEffectShortcut(shortcut: string | null): Promise<void> {
   }
 }
 interface ActionItem {
+  shortcutId?: string;
   kind: "action";
   id: string;
   name: string;
@@ -136,6 +140,8 @@ interface ActionItem {
 }
 
 const actionIconPaths: Record<string, string> = {
+  "add-adjustment-layer": "M3 12l9-5 9 5-9 5z M3 16l9 5 9-5 M12 2v5m-2-3h4",
+  "set-adjustment-layer-source": "M3 10l9-5 9 5-9 5z M3 14l9 5 9-5",
   "copy-attributes": "M9 9h11v11H9z M15 6V4H4v11h2",
   "paste-attributes": "M9 5H6v15h12V5h-3 M9 4h6v4H9z M9 12h6m-6 4h6",
   "remove-attributes": "M4 7h16m-14 0 1 13h10l1-13M9 7V4h6v3m-5 4v5m4-5v5",
@@ -154,9 +160,13 @@ const actions: ActionItem[] = [
   { kind: "action", id: "set-opacity", name: "Set Opacity", description: "Set static clip opacity", argument: "Opacity (0–100%)" },
   { kind: "action", id: "set-volume", name: "Set Clip Volume", description: "Set static clip volume", argument: "Volume (−100 to +15 dB)" },
 ];
+const commands: ActionItem[] = [
+  { kind: "action", id: "add-adjustment-layer", shortcutId: "command:add-adjustment-layer", name: "Add Adjustment Layer Above Clip", description: "Span selected video clips · Right-click to assign a shortcut" },
+  { kind: "action", id: "set-adjustment-layer-source", name: "Set Adjustment Layer Source", description: "Select an existing adjustment layer in the timeline first" },
+];
 type PaletteItem = CatalogItem | ActionItem | (ProjectMedia & { kind: "project"; projectId: string });
 let visible: PaletteItem[] = [];
-const searchModes = ["all", "effects", "project", "actions"] as const;
+const searchModes = ["all", "effects", "project", "actions", "commands"] as const;
 type SearchMode = typeof searchModes[number];
 let searchMode: SearchMode = "all";
 let binStack: ProjectMedia[] = [];
@@ -203,7 +213,7 @@ let expanded = false;
 let resizePending = Promise.resolve();
 
 function showsResults(): boolean {
-  return Boolean(input.value.trim()) || searchMode === "project" || searchMode === "actions";
+  return Boolean(input.value.trim()) || searchMode === "project" || searchMode === "actions" || searchMode === "commands";
 }
 
 function updatePaletteSize(): void {
@@ -323,7 +333,9 @@ function render(): void {
       .map(({ item, rank }) => ({ item: { ...item, kind: "project" as const, projectId: currentProject }, rank })) : [];
   const effectResults = searchMode === "all" || searchMode === "effects"
     ? rankEffects(index, query, "all", [], limit) : [];
-  const actionResults = searchMode === "all" || searchMode === "actions" ? matchingActions(query) : [];
+  const actionResults = searchMode === "commands"
+    ? commands.filter((item) => normalize(query).split(/\s+/).every((word) => normalize(item.name).includes(word)))
+    : searchMode === "all" || searchMode === "actions" ? matchingActions(query) : [];
   if (searchMode === "all") {
     const markerSearch = markers && /^go to marker(?:\s|$)/i.test(query.trimStart());
     const normalizedQuery = normalize(query);
@@ -348,7 +360,9 @@ function render(): void {
       binStack.length, projectChildren.has(effect.id), expandedBins.has(effect.id),
     ] : null;
     const details = effect.kind === "project" ? [effect.projectId, effect.mediaType, effect.bins, effect.binIds?.length] :
-      effect.kind === "preset" ? effect.folders : effect.kind === "action" ? [effect.description, effect.value] : effectShortcuts[effect.id];
+      effect.kind === "preset" ? effect.folders : effect.kind === "action"
+        ? [effect.description, effect.value, effect.shortcutId && effectShortcuts[effect.shortcutId]]
+        : effectShortcuts[effect.id];
     const key = JSON.stringify([effect.kind, effect.id, effect.name, details, treeState]);
     const row = reusableRows.get(key) ?? createResultRow(effect, tree);
     reusableRows.delete(key);
@@ -370,7 +384,7 @@ function render(): void {
   element("empty").hidden = visible.length > 0;
   if (!visible.length) {
     const connected = snapshot?.connected;
-    const noMatches = searchMode === "actions" || index.length;
+    const noMatches = searchMode === "actions" || searchMode === "commands" || index.length;
     element("empty-title").textContent = noMatches ? "No matching results" : connected ? "Getting your effects…" : "Connect to Premiere";
     element("empty-message").textContent = noMatches ? "Try a shorter name." : connected ? "Reading the effects installed in Premiere." : "Connect the Helm Bridge panel in Premiere to get started.";
     element("setup-button").hidden = !!connected;
@@ -423,8 +437,10 @@ function createResultRow(effect: PaletteItem, tree: boolean): HTMLButtonElement 
   enter.className = "row-enter";
   enter.textContent = effect.kind === "project" && effect.mediaType === "bin" ? "" : "↵";
   row.append(icon, name, type, enter);
-  if (effect.kind === "video" || effect.kind === "audio") {
-    const accelerator = effectShortcuts[effect.id];
+  const shortcutTarget = effect.kind === "video" || effect.kind === "audio" ? effect
+    : effect.kind === "action" && effect.shortcutId ? { ...effect, id: effect.shortcutId } : undefined;
+  if (shortcutTarget) {
+    const accelerator = effectShortcuts[shortcutTarget.id];
     if (accelerator) {
       const badge = document.createElement("kbd");
       badge.className = "effect-shortcut-badge";
@@ -432,7 +448,7 @@ function createResultRow(effect: PaletteItem, tree: boolean): HTMLButtonElement 
       row.classList.add("has-effect-shortcut");
       row.append(badge);
     }
-    row.addEventListener("contextmenu", (event) => showEffectShortcutMenu(effect, event));
+    row.addEventListener("contextmenu", (event) => showEffectShortcutMenu(shortcutTarget, event));
   }
   if (tree && effect.kind === "project") {
     row.classList.add("project-tree-row");
@@ -566,7 +582,7 @@ function setSearchMode(mode: SearchMode): void {
   markers = undefined;
   binStack = [];
   expandedBins.clear();
-  input.placeholder = { all: "Search effects, project media, and actions…", effects: "Find an effect or preset…", project: "Find media, sequences, or bins…", actions: "Find an action…" }[mode];
+  input.placeholder = { all: "Search effects, project media, and actions…", effects: "Find an effect or preset…", project: "Find media, sequences, or bins…", actions: "Find an action…", commands: "Find a shortcut command…" }[mode];
   input.setAttribute("aria-label", input.placeholder);
   for (const option of searchModes) {
     element(`${option}-mode`).setAttribute("aria-pressed", String(option === mode));

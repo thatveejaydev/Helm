@@ -83,11 +83,11 @@ pub fn set_effect_shortcut(
     effect_id: String,
     shortcut: Option<String>,
 ) -> Result<Bindings, String> {
-    if !effect_id
+    if effect_id != "command:add-adjustment-layer" && !effect_id
         .split_once(':')
         .is_some_and(|(kind, id)| matches!(kind, "video" | "audio") && !id.is_empty())
     {
-        return Err("Choose an audio or video effect.".into());
+        return Err("Choose an effect or a supported command.".into());
     }
     let mut bindings = state.bindings.lock().unwrap();
     let previous = bindings
