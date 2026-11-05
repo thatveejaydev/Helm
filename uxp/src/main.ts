@@ -44,7 +44,7 @@ async function publishCatalog(connection: WebSocket): Promise<number> {
   if (socket !== connection || connection.readyState !== WebSocket.OPEN) throw new Error("Helm disconnected.");
   catalog = new Map(effects.map((effect) => [effect.id, effect]));
   send(connection, { type: "catalog", effects });
-  status(`Connected · ${effects.length} effects available`);
+  status("Connected");
   return effects.length;
 }
 
@@ -220,12 +220,6 @@ function bindPanel(): void {
   if (!document.getElementById("status") || bindPending) return;
   bindPending = true;
   status(statusText);
-  document.getElementById("refresh")?.addEventListener("click", () => {
-    if (!socket || !authenticated) { status("Connect the Helm desktop app first."); return; }
-    if (busy) return;
-    busy = true;
-    void publishCatalog(socket).catch((error) => status(errorMessage(error))).finally(() => { busy = false; });
-  });
   document.getElementById("reload")?.addEventListener("click", () => {
     window.location.reload();
   });

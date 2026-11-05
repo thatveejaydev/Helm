@@ -30,9 +30,9 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
     </div>
   </section>
   <footer id="palette-footer" data-tauri-drag-region hidden>
-    <div class="brand"><span class="brand-mark">H</span> HELM</div>
+    <div class="brand"><span class="brand-mark">H</span> HELM <span id="connection" class="connection" role="img" aria-label="Connecting to Premiere"></span></div>
     <div class="footer-info"><span id="status" role="status">Ready when you are.</span></div>
-    <div class="footer-actions"><span id="connection" class="connection">Connecting</span><button id="settings-toggle" class="icon-button" aria-label="Connection settings" title="Connection settings">⚙</button></div>
+    <div class="footer-actions"><button id="settings-toggle" class="icon-button" aria-label="Connection settings" title="Connection settings">⚙</button></div>
   </footer>
   <button id="effect-shortcut-menu" class="effect-shortcut-menu" type="button" hidden>Assign shortcut…</button>
   <dialog id="effect-shortcut-dialog" aria-labelledby="effect-shortcut-name">
@@ -736,8 +736,9 @@ function update(next: BridgeSnapshot): void {
     clearProjectCache();
   }
   rebuildIndex();
-  element("connection").textContent = next.connected ? "Premiere connected" : "Premiere offline";
-  element("connection").classList.toggle("online", next.connected);
+  const connection = element("connection");
+  connection.setAttribute("aria-label", next.connected ? "Premiere connected" : "Premiere offline");
+  connection.classList.toggle("online", next.connected);
   if (!recordingShortcut) {
     element("shortcut").textContent = next.shortcut.replaceAll("+", " + ");
   }
