@@ -21,6 +21,7 @@ function status(message: string): void {
   statusText = message;
   const label = document.getElementById("status");
   if (label) label.textContent = message;
+  document.getElementById("connection-dot")?.classList.toggle("online", authenticated);
 }
 
 function send(connection: WebSocket, message: object): void {
@@ -165,7 +166,7 @@ async function connect(): Promise<void> {
     if (socket !== connection) return;
     socket = undefined;
     authenticated = false;
-    if (!rejected) status("Waiting for the Helm desktop app…");
+    status(rejected ? statusText : "Waiting for the Helm desktop app…");
     scheduleReconnect();
   };
 }

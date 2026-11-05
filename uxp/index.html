@@ -1,5 +1,5 @@
 <!doctype html>
-<html>
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <link rel="stylesheet" href="style.css" />
@@ -7,11 +7,17 @@
   </head>
   <body>
     <section>
-      <h2>Helm Bridge</h2>
-      <p id="status">Waiting for the Helm desktop app…</p>
+      <div class="heading">
+        <span class="brand-mark" aria-hidden="true">H</span>
+        <h2>Helm Bridge</h2>
+      </div>
+      <div class="connection">
+        <span id="connection-dot" class="connection-dot" aria-hidden="true"></span>
+        <p id="status" role="status">Waiting for the Helm desktop app…</p>
+      </div>
       <div class="actions">
-        <button id="refresh">Refresh effects</button>
-        <button id="reload">Reload plugin</button>
+        <sp-button id="refresh" variant="secondary" size="s">Refresh effects</sp-button>
+        <sp-button id="reload" quiet variant="secondary" size="s">Reload plugin</sp-button>
       </div>
     </section>
   </body>

@@ -63,6 +63,7 @@ const searchModes = ["all", "effects", "project", "commands"] as const;
 type SearchMode = typeof searchModes[number];
 let searchMode: SearchMode = "all";
 let binStack: ProjectMedia[] = [];
+const expandedBins = new Set<string>();
 let projectId: string | undefined;
 let projectIndex: ReturnType<typeof indexProjectMedia> = [];
 let projectLoading = false;
@@ -98,8 +99,12 @@ function stopRecordingShortcut(): void {
 let expanded = false;
 let resizePending = Promise.resolve();
 
+function showsResults(): boolean {
+  return Boolean(input.value.trim()) || searchMode === "project" || searchMode === "commands";
+}
+
 function updatePaletteSize(): void {
-  const next = settingsOpen || Boolean(input.value.trim());
+  const next = settingsOpen || showsResults();
   element("palette-footer").hidden = !next;
   if (expanded === next) return;
   expanded = next;
@@ -154,17 +159,41 @@ function projectQuery(query: string) {
   return { search, tracks };
 }
 
+function browsingProjectTree(): boolean {
+  return searchMode === "project" && !input.value.trim();
+}
+
+function projectTree(root: ProjectMedia | undefined) {
+  const children = new Map<string | undefined, ReturnType<typeof rankProjectMedia>>();
+  for (const entry of rankProjectMedia(projectIndex, "", projectIndex.length)) {
+    const parent = entry.item.binIds?.at(-1);
+    const siblings = children.get(parent) ?? [];
+    siblings.push(entry);
+    children.set(parent, siblings);
+  }
+  function branch(parent: string | undefined): ReturnType<typeof rankProjectMedia> {
+    return (children.get(parent) ?? []).flatMap((entry) => {
+      const { item } = entry;
+      if (item.mediaType !== "bin") return parent === undefined ? [] : [entry];
+      return expandedBins.has(item.id) ? [entry, ...branch(item.id)] : [entry];
+    });
+  }
+  return branch(root?.id);
+}
+
 function render(): void {
   const query = input.value;
   const currentProject = projectId;
   const bin = binStack.at(-1);
   const hasQuery = Boolean(query.trim());
+  const tree = browsingProjectTree();
+  const binsWithChildren = tree ? new Set(projectIndex.map(({ item }) => item.binIds?.at(-1))) : undefined;
   updatePaletteSize();
-  element("insert-hint").hidden = searchMode !== "project" || (!hasQuery && !bin);
+  element("insert-hint").hidden = searchMode !== "project";
   element("insert-hint").textContent = bin
-    ? `${[...bin.bins, bin.name].join(" › ")} · Esc to go back`
-    : "Enter inserts · Shift+Enter opens item · v2: a2: prefers tracks";
-  if (!hasQuery) {
+    ? `${[...bin.bins, bin.name].join(" › ")} · ← Back`
+    : hasQuery ? "Enter inserts · Shift+Enter opens item · v2: a2: prefers tracks" : "→ Expand · ← Collapse";
+  if (!showsResults()) {
     visible = [];
     selected = 0;
     results.replaceChildren();
@@ -173,8 +202,9 @@ function render(): void {
     return;
   }
   const limit = 60;
+  const projectEntries = bin ? projectIndex.filter(({ item }) => item.binIds?.includes(bin.id)) : projectIndex;
   const projectResults = (searchMode === "all" || searchMode === "project") && currentProject !== undefined
-    ? rankProjectMedia(bin ? projectIndex.filter(({ item }) => item.binIds?.includes(bin.id)) : projectIndex, projectQuery(query).search, limit)
+    ? (tree ? projectTree(bin) : rankProjectMedia(projectEntries, projectQuery(query).search, limit))
       .map(({ item, rank }) => ({ item: { ...item, kind: "project" as const, projectId: currentProject }, rank })) : [];
   const effectResults = searchMode === "all" || searchMode === "effects"
     ? rankEffects(index, query, "all", [], limit) : [];
@@ -232,8 +262,26 @@ function render(): void {
     }
     const enter = document.createElement("span");
     enter.className = "row-enter";
-    enter.textContent = "↵";
+    enter.textContent = effect.kind === "project" && effect.mediaType === "bin" ? "" : "↵";
     row.append(icon, name, type, enter);
+    if (tree && effect.kind === "project") {
+      row.classList.add("project-tree-row");
+      const depth = Math.max(0, (effect.binIds?.length ?? 0) - binStack.length);
+      row.style.setProperty("--bin-depth", String(depth));
+      if (effect.mediaType === "bin") {
+        icon.textContent = "";
+        if (binsWithChildren?.has(effect.id)) {
+          const open = expandedBins.has(effect.id);
+          enter.classList.add("bin-chevron");
+          enter.classList.toggle("expanded", open);
+          enter.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="m6 4 4 4-4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+          enter.setAttribute("aria-hidden", "true");
+          row.setAttribute("aria-label", `${effect.name}, ${open ? "expanded" : "collapsed"} bin`);
+        } else {
+          row.setAttribute("aria-label", `${effect.name}, empty bin`);
+        }
+      }
+    }
     row.addEventListener("pointermove", () => select(position));
     row.addEventListener("click", () => void apply(effect));
     results.append(row);
@@ -248,8 +296,10 @@ function render(): void {
     element("setup-button").hidden = !!connected;
     if (searchMode === "project" && connected) {
       element("empty-title").textContent = projectLoading ? "Reading project media…" :
-        projectError ? "Project search unavailable" : projectIndex.length ? "No matching media" : "No imported media found";
-      element("empty-message").textContent = projectError || (projectIndex.length ? "Try a clip name or bin path." : "");
+        projectError ? "Project search unavailable" :
+        !hasQuery ? bin ? "This bin is empty" : "No project bins" :
+        projectIndex.length ? "No matching media" : "No imported media found";
+      element("empty-message").textContent = projectError || (hasQuery && projectIndex.length ? "Try a clip name or bin path." : "");
     }
   }
 }
@@ -280,6 +330,7 @@ function setSearchMode(mode: SearchMode): void {
   selected = 0;
   markers = undefined;
   binStack = [];
+  expandedBins.clear();
   input.placeholder = { all: "Search effects, project media, and commands…", effects: "Find an effect or preset…", project: "Find media, sequences, or bins…", commands: "Find a command…" }[mode];
   input.setAttribute("aria-label", input.placeholder);
   for (const option of searchModes) {
@@ -297,6 +348,28 @@ function select(position: number): void {
   }
   input.setAttribute("aria-activedescendant", visible.length ? `effect-${selected}` : "");
   results.children[selected]?.scrollIntoView({ block: "nearest" });
+}
+
+function enterBin(bin: ProjectMedia): void {
+  const parents = (bin.binIds ?? []).flatMap((id) => {
+    const parent = projectIndex.find(({ item }) => item.id === id)?.item;
+    return parent ? [parent] : [];
+  });
+  input.value = "";
+  if (searchMode !== "project") setSearchMode("project");
+  binStack = [...parents, bin];
+  selected = 0;
+  render();
+  input.focus();
+}
+
+function leaveBin(): void {
+  const bin = binStack.pop();
+  input.value = "";
+  selected = 0;
+  render();
+  const previous = visible.findIndex((item) => item.kind === "project" && item.id === bin?.id);
+  if (previous >= 0) select(previous);
 }
 
 async function runCommand(command: CommandItem): Promise<void> {
@@ -334,12 +407,16 @@ async function apply(effect: PaletteItem, alternate = false): Promise<void> {
   if (busy) return;
   if (!snapshot?.connected) { setStatus("Connect the Helm panel in Premiere first.", true); return; }
   if (effect.kind === "project" && effect.mediaType === "bin") {
-    input.value = "";
-    if (searchMode !== "project") setSearchMode("project");
-    binStack.push(effect);
-    selected = 0;
-    render();
-    input.focus();
+    if (browsingProjectTree()) {
+      if (!projectIndex.some(({ item }) => item.binIds?.at(-1) === effect.id)) return;
+      selected = visible.findIndex((item) => item.kind === "project" && item.id === effect.id);
+      if (expandedBins.has(effect.id)) expandedBins.delete(effect.id);
+      else expandedBins.add(effect.id);
+      render();
+      input.focus();
+    } else {
+      enterBin(effect);
+    }
     return;
   }
   busy = true;
@@ -479,16 +556,46 @@ document.addEventListener("keydown", async (event) => {
   if (event.key === "Escape") {
     event.preventDefault();
     if (settingsOpen) openSettings(false);
-    else if (!busy && binStack.length) {
-      binStack.pop();
-      input.value = "";
-      selected = 0;
-      render();
-    }
+    else if (!busy && binStack.length) leaveBin();
     else if (!busy) void invoke("dismiss_palette", { restoreFocus: true });
     return;
   }
   if (settingsOpen || busy) return;
+  if (searchMode === "project" && event.target === input &&
+      !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey) {
+    const item = visible[selected];
+    if (event.key === "ArrowRight" && input.selectionStart === input.value.length &&
+        input.selectionEnd === input.value.length && item?.kind === "project" && item.mediaType === "bin") {
+      event.preventDefault();
+      if (!event.repeat) {
+        if (!browsingProjectTree()) enterBin(item);
+        else if (!expandedBins.has(item.id)) void apply(item);
+        else {
+          const child = visible[selected + 1];
+          if (child?.kind === "project" && child.binIds?.at(-1) === item.id) select(selected + 1);
+        }
+      }
+      return;
+    }
+    if (event.key === "ArrowLeft" && browsingProjectTree() && item?.kind === "project") {
+      if (expandedBins.has(item.id)) {
+        event.preventDefault();
+        if (!event.repeat) void apply(item);
+        return;
+      }
+      const parent = visible.findIndex((entry) => entry.kind === "project" && entry.id === item.binIds?.at(-1));
+      if (parent >= 0) {
+        event.preventDefault();
+        if (!event.repeat) select(parent);
+        return;
+      }
+    }
+    if (event.key === "ArrowLeft" && !input.value && binStack.length) {
+      event.preventDefault();
+      if (!event.repeat) leaveBin();
+      return;
+    }
+  }
   if (event.key === "Tab" && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey &&
       event.target === input && !input.value) {
     event.preventDefault();

@@ -1,6 +1,10 @@
-body { margin: 0; padding: 12px; color: #dedce5; background-color: #222226; font-family: sans-serif; }
-section { display: flex; flex-direction: column; }
-h2 { font-size: 16px; margin: 0 0 8px; }
-p { font-size: 12px; color: #b1a7c5; margin: 0 0 12px; }
-.actions { display: flex; flex-direction: row; margin-top: 8px; }
-button { padding: 5px 8px; margin: 0 6px 0 0; color: #eee; background-color: #41394d; border: 1px solid #625772; border-radius: 4px; font-size: 11px; }
+body { margin: 0; padding: 16px; color: #e8e9eb; background-color: #1d1d1f; font-family: "Segoe UI", sans-serif; }
+.heading { display: flex; align-items: center; }
+.brand-mark { width: 24px; height: 24px; margin-right: 9px; border-radius: 5px; background-color: #b6a4f3; color: #201a30; font-size: 13px; font-weight: 700; line-height: 24px; text-align: center; }
+h2 { margin: 0; font-size: 14px; font-weight: 600; }
+.connection { display: flex; align-items: center; margin-top: 12px; }
+.connection-dot { width: 6px; height: 6px; flex-shrink: 0; margin-right: 7px; border-radius: 3px; background-color: #85828d; }
+.connection-dot.online { background-color: #94c9a2; }
+#status { margin: 0; color: #b6b3bf; font-size: 12px; }
+.actions { display: flex; flex-wrap: wrap; margin-top: 14px; padding-top: 12px; border-top: 1px solid #343439; }
+#refresh { margin-right: 6px; }
