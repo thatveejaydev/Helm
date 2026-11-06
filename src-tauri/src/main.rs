@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod bridge;
+#[cfg(windows)]
+mod cursor_lock;
 mod effect_shortcuts;
 mod platform;
 mod plugin_installer;
@@ -329,6 +331,10 @@ fn main() {
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, key, event| {
+                    #[cfg(windows)]
+                    if event.state() == ShortcutState::Released {
+                        cursor_lock::release_shortcut(key.id());
+                    }
                     if event.state() != ShortcutState::Pressed {
                         return;
                     }
@@ -343,6 +349,13 @@ fn main() {
                     let palette_key = bridge.shortcut().parse::<Shortcut>();
                     if !palette_key.is_ok_and(|palette_key| palette_key.id() == key.id()) {
                         let Some(effect_id) = bindings.and_then(|bindings| bindings.effect_for(key)) else { return };
+                        #[cfg(windows)]
+                        if effect_id == cursor_lock::COMMAND_ID {
+                            if let Err(error) = cursor_lock::engage(key.id()) {
+                                let _ = app.emit("effect-shortcut-error", error);
+                            }
+                            return;
+                        }
                         let bridge = bridge.inner().clone();
                         let app = app.clone();
                         tauri::async_runtime::spawn(async move {
@@ -482,6 +495,14 @@ fn main() {
             }
             _ => {}
         })
-        .run(tauri::generate_context!())
-        .expect("Helm could not start");
+        .build(tauri::generate_context!())
+        .expect("Helm could not start")
+        .run(|_, event| {
+            #[cfg(windows)]
+            if matches!(event, tauri::RunEvent::Exit) {
+                cursor_lock::release();
+            }
+            #[cfg(not(windows))]
+            let _ = event;
+        });
 }

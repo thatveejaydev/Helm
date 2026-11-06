@@ -99,6 +99,9 @@ fn sync_registration(app: &AppHandle) {
     use tauri::Emitter;
 
     let active = premiere_is_active();
+    if !active {
+        crate::cursor_lock::release();
+    }
     let palette = app
         .state::<std::sync::Arc<crate::bridge::Bridge>>()
         .shortcut()
@@ -183,6 +186,7 @@ fn watch_foreground(app: &AppHandle) -> Result<(), String> {
     APP.with(|slot| {
         let _ = slot.set(app.clone());
     });
+    crate::cursor_lock::enable();
     sync_registration(app);
     Ok(())
 }
@@ -209,7 +213,12 @@ pub fn set_effect_shortcut(
     effect_id: String,
     shortcut: Option<String>,
 ) -> Result<Bindings, String> {
-    if effect_id != "command:add-adjustment-layer"
+    #[cfg(windows)]
+    let cursor_command = effect_id == crate::cursor_lock::COMMAND_ID;
+    #[cfg(not(windows))]
+    let cursor_command = false;
+    if !cursor_command
+        && effect_id != "command:add-adjustment-layer"
         && !effect_id
             .split_once(':')
             .is_some_and(|(kind, id)| matches!(kind, "video" | "audio") && !id.is_empty())

@@ -177,6 +177,7 @@ interface ActionItem {
 }
 
 const actionIconPaths: Record<string, string> = {
+  "lock-cursor-horizontally": "M3 12h18M7 8l-4 4 4 4m10-8 4 4-4 4",
   "add-adjustment-layer": "M3 12l9-5 9 5-9 5z M3 16l9 5 9-5 M12 2v5m-2-3h4",
   "set-adjustment-layer-source": "M3 10l9-5 9 5-9 5z M3 14l9 5 9-5",
   "copy-attributes": "M9 9h11v11H9z M15 6V4H4v11h2",
@@ -197,9 +198,14 @@ const actions: ActionItem[] = [
   { kind: "action", id: "set-opacity", name: "Set Opacity", description: "Set static clip opacity", argument: "Opacity (0–100%)" },
   { kind: "action", id: "set-volume", name: "Set Clip Volume", description: "Set static clip volume", argument: "Volume (−100 to +15 dB)" },
 ];
+const horizontalCursorLock: ActionItem = {
+  kind: "action", id: "lock-cursor-horizontally", shortcutId: "command:lock-cursor-horizontally",
+  name: "Hold to Lock Cursor Horizontally", description: "Hold your assigned shortcut in Premiere to move the pointer only left and right",
+};
 const commands: ActionItem[] = [
   { kind: "action", id: "add-adjustment-layer", shortcutId: "command:add-adjustment-layer", name: "Add Adjustment Layer Above Clip", description: "Span selected video clips · Right-click to assign a shortcut" },
   { kind: "action", id: "set-adjustment-layer-source", name: "Set Adjustment Layer Source", description: "Select an existing adjustment layer in the timeline first" },
+  horizontalCursorLock,
 ];
 type PaletteItem = CatalogItem | ActionItem | (ProjectMedia & { kind: "project"; projectId: string });
 let visible: PaletteItem[] = [];
@@ -698,6 +704,11 @@ async function runAction(action: ActionItem): Promise<void> {
 
 async function apply(effect: PaletteItem, alternate = false): Promise<void> {
   if (busy) return;
+  if (effect.kind === "action" && effect.id === horizontalCursorLock.id && effect.shortcutId) {
+    shortcutEffect = { ...effect, id: effect.shortcutId };
+    openEffectShortcutRecorder();
+    return;
+  }
   if (!snapshot?.connected) { setStatus("Connect the Helm panel in Premiere first.", true); return; }
   if (effect.kind === "project" && effect.mediaType === "bin") {
     if (browsingProjectTree()) {
