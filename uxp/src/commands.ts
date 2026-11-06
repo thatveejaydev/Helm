@@ -35,7 +35,18 @@ async function* projectClips(
   }
 }
 
-const projectLookups = new WeakMap<premierepro, { projectId: string; parents: Map<string, FolderItem> }>();
+type MediaType = NonNullable<ProjectMedia["mediaType"]>;
+
+const projectLookups = new WeakMap<premierepro, {
+  projectId: string;
+  sequenceId: string | null;
+  parents: Map<string, FolderItem>;
+  inventory: string;
+  version: number;
+  itemIds: Set<string>;
+  mediaTypes: Map<string, MediaType>;
+}>();
+let catalogVersion = 0;
 const audioExtension = /\.(wav|mp3|aac|m4a|aif|aiff|flac|ogg|opus|wma|ac3)$/i;
 
 export function clearProjectLookup(ppro: premierepro): void {
@@ -99,62 +110,107 @@ async function checkNesting(
   }
 }
 
-async function listProjectMedia(ppro: premierepro, parents?: Map<string, FolderItem>): Promise<ProjectMediaCatalog> {
-  const project = await ppro.Project.getActiveProject();
-  if (!project) throw new Error("Open a Premiere project first.");
+async function collectProjectItems(ppro: premierepro, project: Project) {
   const sequences = await projectSequences(project);
-  const active = await project.getActiveSequence();
+  const entries = [];
+  for await (const entry of projectClips(ppro, await project.getRootItem(), sequences)) {
+    entries.push({ ...entry, id: entry.item.getId(), name: entry.item.name, type: entry.item.type });
+  }
+  return { entries, sequences };
+}
+
+async function buildProjectCatalog(
+  ppro: premierepro,
+  key: Pick<ProjectCatalogKey, "projectId" | "sequenceId">,
+  { entries, sequences }: Awaited<ReturnType<typeof collectProjectItems>>,
+  parents?: Map<string, FolderItem>,
+  cachedTypes?: ReadonlyMap<string, MediaType>,
+) {
   const items: ProjectMediaCatalog["items"] = [];
-  for await (const { item, bins, binIds, parent } of projectClips(ppro, await project.getRootItem(), sequences)) {
-    const id = item.getId();
-    if (item.type === ppro.ProjectItem.TYPE_BIN) {
-      items.push({ id, name: item.name, bins, binIds, mediaType: "bin" });
+  const mediaTypes = new Map<string, MediaType>();
+  let reused = 0;
+  let metadataReads = 0;
+  for (const { item, id, name, type, bins, binIds, parent } of entries) {
+    if (type === ppro.ProjectItem.TYPE_BIN) {
+      items.push({ id, name, bins, binIds, mediaType: "bin" });
       continue;
     }
     parents?.set(id, parent);
     const sequence = sequences.get(id);
     if (sequence) {
-      if (sequence.guid.toString() !== active?.guid.toString()) {
-        items.push({ id, name: item.name, bins, binIds, mediaType: "sequence" });
+      if (sequence.guid.toString() !== key.sequenceId) {
+        items.push({ id, name, bins, binIds, mediaType: "sequence" });
       }
       continue;
     }
+    const cached = cachedTypes?.get(id);
+    if (cached !== undefined) {
+      reused++;
+      mediaTypes.set(id, cached);
+      items.push({ id, name, bins, binIds, mediaType: cached });
+      continue;
+    }
+    metadataReads++;
     const clip = ppro.ClipProjectItem.cast(item);
-    let mediaType: ProjectMedia["mediaType"] = "other";
+    let mediaType: MediaType = "other";
     try {
       const path = await clip.getMediaFilePath();
       if (!path && !await clip.isOffline()) mediaType = "generated";
       else if (audioExtension.test(path)) mediaType = "audio";
       else if (/\.(png|jpe?g|gif|bmp|tiff?|webp|psd|heic|exr|dpx|tga|svg|ai)$/i.test(path)) mediaType = "image";
       else if (/\.(mp4|mov|mxf|avi|mkv|webm|mts|m2ts|m4v|mpg|mpeg|wmv|r3d|braw|crm|ari)$/i.test(path)) mediaType = "video";
+      mediaTypes.set(id, mediaType);
     } catch {
       // Unavailable media metadata should not hide a searchable project item.
     }
-    items.push({ id, name: item.name, bins, binIds, mediaType });
+    items.push({ id, name, bins, binIds, mediaType });
   }
-  return { projectId: project.guid.toString(), items };
+  return { catalog: { projectId: key.projectId, items }, mediaTypes, reused, metadataReads };
 }
 
 export async function readProjectCatalog(
   ppro: premierepro, known: unknown, revision: () => number,
 ): Promise<ProjectCatalogReply> {
-  const getKey = async (): Promise<ProjectCatalogKey> => {
-    const project = await ppro.Project.getActiveProject();
-    if (!project) throw new Error("Open a Premiere project first.");
-    const sequence = await project.getActiveSequence();
-    return { projectId: project.guid.toString(), sequenceId: sequence?.guid.toString() ?? null, revision: revision() };
+  const getContext = async () => {
+    const { project, sequence } = await activeTimelineForCatalog(ppro);
+    const key: ProjectCatalogKey = { projectId: project.guid.toString(), sequenceId: sequence?.guid.toString() ?? null, revision: revision() };
+    return { project, key };
   };
-  const key = await getKey();
+  const { project, key } = await getContext();
   const matches = (other?: Partial<ProjectCatalogKey> | null) =>
     key.projectId === other?.projectId && key.sequenceId === other.sequenceId && key.revision === other.revision;
-  if (matches(known as Partial<ProjectCatalogKey> | null)) return { key };
+  const snapshot = await collectProjectItems(ppro, project);
+  const inventory = JSON.stringify(snapshot.entries.map(({ id, name, type, binIds }) =>
+    [id, name, type, binIds[binIds.length - 1], snapshot.sequences.has(id)]));
+  const cached = known as Partial<ProjectCatalogKey> | null | undefined;
+  const lookup = projectLookups.get(ppro);
+  const previous = cached?.projectId === key.projectId && lookup?.projectId === key.projectId ? lookup : undefined;
+  if (previous && cached?.catalogVersion === previous.version &&
+      previous.sequenceId === key.sequenceId && previous.inventory === inventory) {
+    if (!matches((await getContext()).key)) throw new Error("The Premiere project changed during the scan.");
+    return { key: { ...key, catalogVersion: previous.version } };
+  }
   const parents = new Map<string, FolderItem>();
-  const catalog = await listProjectMedia(ppro, parents);
-  if (catalog.projectId !== key.projectId || !matches(await getKey())) {
+  const { catalog, mediaTypes, reused, metadataReads } =
+    await buildProjectCatalog(ppro, key, snapshot, parents, previous?.mediaTypes);
+  if (!matches((await getContext()).key)) {
     throw new Error("The Premiere project changed during the scan.");
   }
-  projectLookups.set(ppro, { projectId: key.projectId, parents });
-  return { key, catalog };
+  const version = ++catalogVersion;
+  const itemIds = new Set(snapshot.entries.map(({ id }) => id));
+  const incremental = previous ? {
+    added: [...itemIds].filter((id) => !previous.itemIds.has(id)).length, reused, metadataReads,
+  } : undefined;
+  projectLookups.set(ppro, {
+    projectId: key.projectId, sequenceId: key.sequenceId, parents, inventory, version, itemIds, mediaTypes,
+  });
+  return { key: { ...key, catalogVersion: version }, catalog, incremental };
+}
+
+async function activeTimelineForCatalog(ppro: premierepro) {
+  const project = await ppro.Project.getActiveProject();
+  if (!project) throw new Error("Open a Premiere project first.");
+  return { project, sequence: await project.getActiveSequence() };
 }
 
 async function resolveProjectSource(ppro: premierepro, value: unknown) {
@@ -478,8 +534,13 @@ export async function runCommand(ppro: premierepro, command: unknown, value: unk
     case "set-adjustment-layer-source":
     case "add-adjustment-layer":
       return adjustmentLayerCommand(ppro, command === "set-adjustment-layer-source");
-    case "list-project-media":
-      return listProjectMedia(ppro);
+    case "list-project-media": {
+      const { project, sequence } = await activeTimelineForCatalog(ppro);
+      const { catalog } = await buildProjectCatalog(ppro, {
+        projectId: project.guid.toString(), sequenceId: sequence?.guid.toString() ?? null,
+      }, await collectProjectItems(ppro, project));
+      return catalog;
+    }
     case "insert-project-media":
       return insertProjectMedia(ppro, value);
     case "open-project-source":

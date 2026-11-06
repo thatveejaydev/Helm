@@ -145,9 +145,10 @@ test("audio preview resolves the active project's audio file without opening the
   await assert.rejects(runCommand(host, "project-audio-path", selection), /active project changed/);
 });
 
-test("project catalog reuses the current revision and rescans on edits or project switches", async () => {
-  const { host, media, switchProject } = fixture();
+test("project refresh reads metadata only for new items until a full scan is requested", async () => {
+  const { host, media, binItems, rootItems, switchProject } = fixture();
   let scans = 0;
+  let importReads = 0;
   media.getMediaFilePath = async () => { scans++; return "Cam B 001.mov"; };
   let revision = 0;
   const read = (known?: unknown) => readProjectCatalog(host, known, () => revision);
@@ -157,9 +158,34 @@ test("project catalog reuses the current revision and rescans on edits or projec
   assert.equal(scans, 1);
   revision++;
   const changed = await read(first.key);
-  assert.ok(changed.catalog);
+  assert.equal(changed.catalog, undefined);
+  binItems.push({ ...media, name: "Imported.wav", getId: () => "imported",
+    getMediaFilePath: async () => { importReads++; return "Imported.wav"; } });
+  const imported = await read(changed.key);
+  assert.ok(imported.catalog?.items.some((item) => item.id === "imported" && item.mediaType === "audio"));
+  assert.deepEqual(imported.incremental, { added: 1, reused: 1, metadataReads: 1 });
+  assert.equal(scans, 1);
+  assert.equal(importReads, 1);
+  assert.notEqual(imported.key.catalogVersion, changed.key.catalogVersion);
+  assert.deepEqual(await read(imported.key), { key: imported.key });
+  media.name = "Renamed.mov";
+  binItems.splice(binItems.indexOf(media), 1);
+  rootItems.push(media);
+  const moved = await read(imported.key);
+  assert.deepEqual(moved.catalog?.items.find(({ id }) => id === "media"), {
+    id: "media", name: "Renamed.mov", bins: [], binIds: [], mediaType: "video",
+  });
+  binItems.pop();
+  const removed = await read(moved.key);
+  assert.equal(removed.catalog?.items.some(({ id }) => id === "imported"), false);
+  assert.equal(removed.incremental?.metadataReads, 0);
+  assert.equal(scans, 1);
+  const full = await read();
+  assert.ok(full.catalog);
+  assert.equal(full.incremental, undefined);
+  assert.equal(scans, 2);
   switchProject();
-  assert.equal((await read(changed.key)).catalog?.projectId, "other");
+  assert.equal((await read(full.key)).catalog?.projectId, "other");
   assert.equal(scans, 3);
 });
 

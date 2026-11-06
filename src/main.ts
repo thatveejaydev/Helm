@@ -236,7 +236,7 @@ let projectLoading = false;
 let projectCacheKey: ProjectCatalogKey | undefined;
 let projectScannedAt = 0;
 let projectCacheGeneration = 0;
-let projectRefreshPending = false;
+let projectRefreshPending: "check" | "force" | undefined;
 let projectRefreshTimer: ReturnType<typeof setTimeout> | undefined;
 let projectScanCount = 0;
 let projectError = "";
@@ -757,36 +757,41 @@ function clearProjectCache(): void {
   expandedBins.clear();
 }
 
-async function loadProjectMedia(force = false): Promise<void> {
+async function loadProjectMedia(force = false, recheckPending = false): Promise<void> {
   if (!snapshot?.connected) return;
   if (projectLoading) {
-    projectRefreshPending ||= force;
+    if (force) projectRefreshPending = "force";
+    else if (recheckPending) projectRefreshPending ??= "check";
     return;
   }
   projectLoading = true;
   const generation = projectCacheGeneration;
-  // Premiere's dirty event can be missed while a project is already dirty.
-  const key = !force && performance.now() - projectScannedAt < 30_000 ? projectCacheKey : undefined;
+  // Older bridges only compare the dirty revision. New bridges also check the item inventory.
+  const key = !force && (projectCacheKey?.catalogVersion !== undefined || performance.now() - projectScannedAt < 30_000)
+    ? projectCacheKey : undefined;
   projectError = "";
   render();
   const startedAt = performance.now();
   const label = `#${++projectScanCount} · ${new Date().toLocaleTimeString()}`;
   const entry = appendProjectLog("catalog", `${label} · Checking project…`);
   try {
-    const { key: currentKey, catalog } = await invoke<ProjectCatalogReply>("run_palette_command", {
+    const { key: currentKey, catalog, incremental } = await invoke<ProjectCatalogReply>("run_palette_command", {
       action: "list-project-media", value: key,
     });
     const elapsed = Math.round(performance.now() - startedAt);
-    entry(catalog
-      ? `${label} · Full scan · ${catalog.items.length} items · ${elapsed} ms`
-      : `${label} · Cache hit · ${elapsed} ms`);
-    if (generation === projectCacheGeneration && snapshot?.connected && catalog) {
-      if (projectId !== undefined && projectId !== catalog.projectId) clearProjectCache();
-      projectId = catalog.projectId;
-      projectIndex = indexProjectMedia(catalog.items);
-      rebuildProjectTree();
+    const summary = incremental
+      ? `Incremental refresh · ${incremental.added} added · ${incremental.reused} reused · ${incremental.metadataReads} metadata reads`
+      : catalog ? `Full scan · ${catalog.items.length} items` : "Cache hit";
+    entry(`${label} · ${summary} · ${elapsed} ms`);
+    if (generation === projectCacheGeneration && snapshot?.connected) {
+      if (catalog) {
+        if (projectId !== undefined && projectId !== catalog.projectId) clearProjectCache();
+        projectId = catalog.projectId;
+        projectIndex = indexProjectMedia(catalog.items);
+        rebuildProjectTree();
+        projectScannedAt = performance.now();
+      }
       projectCacheKey = currentKey;
-      projectScannedAt = performance.now();
     }
   } catch (error) {
     if (generation === projectCacheGeneration) projectError = String(error);
@@ -795,13 +800,14 @@ async function loadProjectMedia(force = false): Promise<void> {
     projectLoading = false;
     render();
     if (projectRefreshPending) {
-      projectRefreshPending = false;
-      void loadProjectMedia(true);
+      const pending = projectRefreshPending;
+      projectRefreshPending = undefined;
+      void loadProjectMedia(pending === "force");
     }
   }
 }
 
-function setSearchMode(mode: SearchMode): void {
+function setSearchMode(mode: SearchMode, recheckPending = false): void {
   if (searchMode !== mode) stopAudioPreview();
   searchMode = mode;
   selected = 0;
@@ -814,7 +820,7 @@ function setSearchMode(mode: SearchMode): void {
     element(`${option}-mode`).setAttribute("aria-pressed", String(option === mode));
   }
   render();
-  if (mode === "project" || mode === "all") void loadProjectMedia();
+  if (mode === "project" || mode === "all") void loadProjectMedia(false, recheckPending);
 }
 
 function select(position: number): void {
@@ -1359,7 +1365,7 @@ async function start(): Promise<void> {
       render();
     }
     clearTimeout(projectRefreshTimer);
-    projectRefreshTimer = setTimeout(() => void loadProjectMedia(true), 300);
+    projectRefreshTimer = setTimeout(() => void loadProjectMedia(false, true), 300);
   });
   await listen("palette-opened", () => {
     stopAudioPreview();
@@ -1367,7 +1373,7 @@ async function start(): Promise<void> {
     shortcutMenu.hidden = true;
     if (shortcutDialog.open && !savingEffectShortcut) shortcutDialog.close();
     input.value = "";
-    setSearchMode("all");
+    setSearchMode("all", true);
     openSettings(false);
     input.focus();
   });

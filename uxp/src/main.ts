@@ -27,6 +27,7 @@ function notifyProjectChange(reset: boolean): void {
 
 const projectActivated = () => notifyProjectChange(true);
 const projectDirty = () => notifyProjectChange(false);
+const mediaImportComplete = ppro.OperationCompleteEvent?.EVENT_IMPORT_MEDIA_COMPLETE;
 
 function status(message: string): void {
   statusText = message;
@@ -203,6 +204,7 @@ function stop(): void {
     ppro.EventManager.removeGlobalEventListener(ppro.ProjectEvent.EVENT_ACTIVATED, projectActivated);
     ppro.EventManager.removeGlobalEventListener(ppro.ProjectClosedEvent.EVENT_CLOSED, projectActivated);
     ppro.EventManager.removeGlobalEventListener(ppro.ProjectEvent.EVENT_DIRTY, projectDirty);
+    if (mediaImportComplete) ppro.EventManager.removeGlobalEventListener(mediaImportComplete, projectDirty);
   }
   running = false;
   projectRevision++;
@@ -232,6 +234,7 @@ function start(): void {
   ppro.EventManager.addGlobalEventListener(ppro.ProjectEvent.EVENT_ACTIVATED, projectActivated);
   ppro.EventManager.addGlobalEventListener(ppro.ProjectClosedEvent.EVENT_CLOSED, projectActivated);
   ppro.EventManager.addGlobalEventListener(ppro.ProjectEvent.EVENT_DIRTY, projectDirty);
+  if (mediaImportComplete) ppro.EventManager.addGlobalEventListener(mediaImportComplete, projectDirty);
   retryMs = 750;
   void connect();
 }

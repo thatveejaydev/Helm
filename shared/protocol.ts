@@ -72,11 +72,13 @@ export interface ProjectCatalogKey {
   projectId: string;
   sequenceId: string | null;
   revision: number;
+  catalogVersion?: number;
 }
 
 export interface ProjectCatalogReply {
   key: ProjectCatalogKey;
   catalog?: ProjectMediaCatalog;
+  incremental?: { added: number; reused: number; metadataReads: number };
 }
 
 export interface ProjectItemLookup {
