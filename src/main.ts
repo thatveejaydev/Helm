@@ -51,6 +51,13 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
       </div>
     </section>
     <section class="settings-group">
+      <h2>Audio preview</h2>
+      <div class="settings-row">
+        <div><label for="auto-preview-audio">Auto-preview audio</label><p id="auto-preview-description">Play the highlighted audio result after a short pause. Press Alt + P to play or stop a preview manually.</p></div>
+        <input id="auto-preview-audio" type="checkbox" role="switch" aria-describedby="auto-preview-description" />
+      </div>
+    </section>
+    <section class="settings-group">
       <h2>Catalogs</h2>
       <div class="settings-row">
         <div>Refresh catalogs<p>Update the items available in search.</p></div>
@@ -279,6 +286,7 @@ function updatePaletteSize(): void {
 }
 
 function openSettings(open: boolean): void {
+  if (open) stopAudioPreview();
   if (!open && recordingShortcut) stopRecordingShortcut();
   settingsOpen = open;
   element("palette").hidden = open;
@@ -385,6 +393,7 @@ function render(): void {
     results.replaceChildren();
     input.removeAttribute("aria-activedescendant");
     element("empty").hidden = true;
+    syncAudioPreview();
     return;
   }
   const limit = 60;
@@ -413,9 +422,9 @@ function render(): void {
     visible = [...effectResults.map(({ item }) => item), ...projectResults.map(({ item }) => item), ...actionResults];
   }
   selected = Math.min(selected, Math.max(0, visible.length - 1));
-  const previousRows = Array.from(results.children) as HTMLButtonElement[];
+  const previousRows = Array.from(results.children) as HTMLElement[];
   const reusableRows = new Map(previousRows.map((row) => [row.dataset.resultKey, row]));
-  const rows: HTMLButtonElement[] = [];
+  const rows: HTMLElement[] = [];
   for (const [position, effect] of visible.entries()) {
     const treeState = tree && effect.kind === "project" ? [
       binStack.length, projectChildren.has(effect.id), expandedBins.has(effect.id),
@@ -428,9 +437,10 @@ function render(): void {
     const row = reusableRows.get(key) ?? createResultRow(effect, tree);
     reusableRows.delete(key);
     row.dataset.resultKey = key;
-    row.id = `effect-${position}`;
-    row.classList.toggle("selected", position === selected);
-    row.setAttribute("aria-selected", String(position === selected));
+    const option = resultOption(row);
+    option.id = `effect-${position}`;
+    option.classList.toggle("selected", position === selected);
+    option.setAttribute("aria-selected", String(position === selected));
     rows.push(row);
   }
   const retained = new Set(rows);
@@ -442,6 +452,8 @@ function render(): void {
     if (current !== row) results.insertBefore(row, current);
   }
   input.setAttribute("aria-activedescendant", visible.length ? `effect-${selected}` : "");
+  syncAudioPreview();
+  updateAudioPreviewButtons();
   const showEmpty = !visible.length && !showProjectSkeleton;
   element("empty").hidden = !showEmpty;
   if (showEmpty) {
@@ -458,7 +470,135 @@ function render(): void {
   }
 }
 
-function createResultRow(effect: PaletteItem, tree: boolean): HTMLButtonElement {
+function resultOption(row: Element): HTMLElement {
+  return (row.matches(".effect-row") ? row : row.firstElementChild) as HTMLElement;
+}
+
+type AudioResult = Extract<PaletteItem, { kind: "project" }>;
+const autoPreviewAudio = element<HTMLInputElement>("auto-preview-audio");
+try { autoPreviewAudio.checked = localStorage.getItem("helm-auto-preview-audio") === "true"; } catch { /* Use the default. */ }
+autoPreviewAudio.addEventListener("change", () => {
+  try { localStorage.setItem("helm-auto-preview-audio", String(autoPreviewAudio.checked)); } catch { /* Keep the session setting. */ }
+});
+
+const audioPlayer = new Audio();
+let audioUrl: string | undefined;
+let audioTimer: ReturnType<typeof setTimeout> | undefined;
+let audioHighlight: string | undefined;
+let audioPlaying: string | undefined;
+let audioGeneration = 0;
+let audioProgress: HTMLProgressElement | undefined;
+let audioProgressFrame: number | undefined;
+
+function isAudioResult(item: PaletteItem | undefined): item is AudioResult {
+  return item?.kind === "project" && item.mediaType === "audio";
+}
+
+function audioResultKey(item: AudioResult): string {
+  return JSON.stringify([item.projectId, item.id]);
+}
+
+function updateAudioPreviewButtons(): void {
+  audioProgress = undefined;
+  for (const button of results.querySelectorAll<HTMLButtonElement>("[data-audio-preview]")) {
+    const active = button.dataset.audioPreview === audioPlaying;
+    button.setAttribute("aria-pressed", String(active));
+    button.title = active ? "Stop preview (Alt + P)" : "Preview audio (Alt + P)";
+    const progress = button.parentElement?.querySelector<HTMLProgressElement>(".audio-preview-progress");
+    if (progress) {
+      progress.hidden = !active || audioProgressFrame === undefined;
+      if (progress.hidden) progress.value = 0;
+      if (active) audioProgress = progress;
+    }
+  }
+}
+
+function stopAudioPreview(): void {
+  clearTimeout(audioTimer);
+  audioTimer = undefined;
+  audioHighlight = undefined;
+  audioPlaying = undefined;
+  audioGeneration++;
+  if (audioProgressFrame !== undefined) cancelAnimationFrame(audioProgressFrame);
+  audioProgressFrame = undefined;
+  if (audioUrl) {
+    audioPlayer.pause();
+    audioPlayer.removeAttribute("src");
+    audioPlayer.load();
+    URL.revokeObjectURL(audioUrl);
+    audioUrl = undefined;
+  }
+  updateAudioPreviewButtons();
+}
+
+async function playAudioPreview(item: AudioResult): Promise<void> {
+  stopAudioPreview();
+  audioHighlight = audioPlaying = audioResultKey(item);
+  const generation = audioGeneration;
+  updateAudioPreviewButtons();
+  try {
+    const bytes = await invoke<ArrayBuffer | number[]>("preview_project_audio", { projectId: item.projectId, id: item.id });
+    if (generation !== audioGeneration) return;
+    if (!document.hasFocus()) {
+      stopAudioPreview();
+      return;
+    }
+    audioUrl = URL.createObjectURL(new Blob([Array.isArray(bytes) ? Uint8Array.from(bytes) : bytes]));
+    audioPlayer.src = audioUrl;
+    await audioPlayer.play();
+    if (generation !== audioGeneration) return;
+    const paintProgress = () => {
+      if (audioProgress && Number.isFinite(audioPlayer.duration) && audioPlayer.duration > 0) {
+        audioProgress.value = audioPlayer.currentTime / audioPlayer.duration;
+      }
+      audioProgressFrame = requestAnimationFrame(paintProgress);
+    };
+    paintProgress();
+    updateAudioPreviewButtons();
+  } catch (error) {
+    if (generation !== audioGeneration) return;
+    stopAudioPreview();
+    audioHighlight = audioResultKey(item);
+    setStatus(`Could not preview audio: ${error}`, true);
+  }
+}
+
+audioPlayer.addEventListener("ended", () => {
+  const highlight = audioHighlight;
+  stopAudioPreview();
+  audioHighlight = highlight;
+});
+
+function syncAudioPreview(): void {
+  const item = visible[selected];
+  if (!isAudioResult(item) || settingsOpen || busy || !document.hasFocus()) {
+    if (audioHighlight !== undefined) stopAudioPreview();
+    return;
+  }
+  const key = audioResultKey(item);
+  if (key === audioHighlight) return;
+  stopAudioPreview();
+  audioHighlight = key;
+  if (autoPreviewAudio.checked) {
+    audioTimer = setTimeout(() => {
+      if (document.hasFocus() && !busy) void playAudioPreview(item);
+    }, 250);
+  }
+}
+
+function toggleAudioPreview(): void {
+  const item = visible[selected];
+  if (!isAudioResult(item)) return;
+  const key = audioResultKey(item);
+  if (key === audioPlaying) {
+    stopAudioPreview();
+    audioHighlight = key;
+  } else {
+    void playAudioPreview(item);
+  }
+}
+
+function createResultRow(effect: PaletteItem, tree: boolean): HTMLElement {
   const row = document.createElement("button");
   row.className = "effect-row";
   row.role = "option";
@@ -533,11 +673,36 @@ function createResultRow(effect: PaletteItem, tree: boolean): HTMLButtonElement 
   });
   row.addEventListener("click", () => {
     if (inputRenderFrame !== undefined) render();
-    if (row.parentElement === results) {
+    if (results.contains(row)) {
       const current = visible[Number(row.id.slice("effect-".length))];
       if (current) void apply(current);
     }
   });
+  if (isAudioResult(effect)) {
+    const wrapper = document.createElement("div");
+    wrapper.className = "audio-result";
+    const preview = document.createElement("button");
+    preview.type = "button";
+    preview.className = "audio-preview-button icon-button";
+    preview.dataset.audioPreview = audioResultKey(effect);
+    preview.setAttribute("aria-label", `Preview ${effect.name}`);
+    preview.title = "Preview audio (Alt + P)";
+    preview.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M2 6h3l3-3v10l-3-3H2z M10 6a3 3 0 0 1 0 4m2-6a6 6 0 0 1 0 8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    preview.addEventListener("click", () => {
+      if (inputRenderFrame !== undefined) render();
+      if (!results.contains(wrapper) || busy) return;
+      select(Number(row.id.slice("effect-".length)));
+      toggleAudioPreview();
+    });
+    const progress = document.createElement("progress");
+    progress.className = "audio-preview-progress";
+    progress.max = 1;
+    progress.value = 0;
+    progress.hidden = true;
+    progress.setAttribute("aria-hidden", "true");
+    wrapper.append(row, preview, progress);
+    return wrapper;
+  }
   return row;
 }
 
@@ -637,6 +802,7 @@ async function loadProjectMedia(force = false): Promise<void> {
 }
 
 function setSearchMode(mode: SearchMode): void {
+  if (searchMode !== mode) stopAudioPreview();
   searchMode = mode;
   selected = 0;
   markers = undefined;
@@ -654,11 +820,13 @@ function setSearchMode(mode: SearchMode): void {
 function select(position: number): void {
   selected = position;
   for (const [i, row] of Array.from(results.children).entries()) {
-    row.classList.toggle("selected", i === selected);
-    row.setAttribute("aria-selected", String(i === selected));
+    const option = resultOption(row);
+    option.classList.toggle("selected", i === selected);
+    option.setAttribute("aria-selected", String(i === selected));
   }
   input.setAttribute("aria-activedescendant", visible.length ? `effect-${selected}` : "");
   results.children[selected]?.scrollIntoView({ block: "nearest" });
+  syncAudioPreview();
 }
 
 function enterBin(bin: ProjectMedia): void {
@@ -716,6 +884,7 @@ async function runAction(action: ActionItem): Promise<void> {
 
 async function apply(effect: PaletteItem, alternate = false): Promise<void> {
   if (busy) return;
+  stopAudioPreview();
   if (effect.kind === "action" && effect.id === horizontalCursorLock.id && effect.shortcutId) {
     shortcutEffect = { ...effect, id: effect.shortcutId };
     openEffectShortcutRecorder();
@@ -958,6 +1127,23 @@ document.addEventListener("keydown", async (event) => {
     return;
   }
   if (settingsOpen || busy) return;
+  const focusedRow = event.target instanceof HTMLElement ? event.target.closest<HTMLButtonElement>(".effect-row") : null;
+  const focusedIndex = focusedRow ? Number(focusedRow.id.slice("effect-".length)) : undefined;
+  const previewSpace = event.code === "Space" && !event.altKey && !event.shiftKey &&
+    focusedIndex !== undefined && isAudioResult(visible[focusedIndex]);
+  const previewShortcut = event.altKey && !event.shiftKey && event.code === "KeyP";
+  if (!event.ctrlKey && !event.metaKey && (previewSpace || previewShortcut)) {
+    if (inputRenderFrame !== undefined) render();
+    const previewIndex = previewSpace ? focusedIndex : selected;
+    if (previewIndex !== undefined && isAudioResult(visible[previewIndex])) {
+      event.preventDefault();
+      if (!event.repeat) {
+        if (previewSpace) select(previewIndex);
+        toggleAudioPreview();
+      }
+      return;
+    }
+  }
   if (inputRenderFrame !== undefined && ["Enter", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key)) {
     render();
   }
@@ -1176,6 +1362,7 @@ async function start(): Promise<void> {
     projectRefreshTimer = setTimeout(() => void loadProjectMedia(true), 300);
   });
   await listen("palette-opened", () => {
+    stopAudioPreview();
     if (busy) return;
     shortcutMenu.hidden = true;
     if (shortcutDialog.open && !savingEffectShortcut) shortcutDialog.close();
@@ -1184,7 +1371,9 @@ async function start(): Promise<void> {
     openSettings(false);
     input.focus();
   });
+  await listen("palette-closed", stopAudioPreview);
   window.addEventListener("blur", () => {
+    stopAudioPreview();
     if (recordingShortcut) stopRecordingShortcut();
   });
   update(await invoke<BridgeSnapshot>("get_snapshot"));

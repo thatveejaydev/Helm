@@ -36,6 +36,7 @@ async function* projectClips(
 }
 
 const projectLookups = new WeakMap<premierepro, { projectId: string; parents: Map<string, FolderItem> }>();
+const audioExtension = /\.(wav|mp3|aac|m4a|aif|aiff|flac|ogg|opus|wma|ac3)$/i;
 
 export function clearProjectLookup(ppro: premierepro): void {
   projectLookups.delete(ppro);
@@ -123,7 +124,7 @@ async function listProjectMedia(ppro: premierepro, parents?: Map<string, FolderI
     try {
       const path = await clip.getMediaFilePath();
       if (!path && !await clip.isOffline()) mediaType = "generated";
-      else if (/\.(wav|mp3|aac|m4a|aif|aiff|flac|ogg|opus|wma|ac3)$/i.test(path)) mediaType = "audio";
+      else if (audioExtension.test(path)) mediaType = "audio";
       else if (/\.(png|jpe?g|gif|bmp|tiff?|webp|psd|heic|exr|dpx|tga|svg|ai)$/i.test(path)) mediaType = "image";
       else if (/\.(mp4|mov|mxf|avi|mkv|webm|mts|m2ts|m4v|mpg|mpeg|wmv|r3d|braw|crm|ari)$/i.test(path)) mediaType = "video";
     } catch {
@@ -156,7 +157,7 @@ export async function readProjectCatalog(
   return { key, catalog };
 }
 
-async function openProjectSource(ppro: premierepro, value: unknown) {
+async function resolveProjectSource(ppro: premierepro, value: unknown) {
   const selection = value as { projectId?: unknown; id?: unknown } | null | undefined;
   const project = await ppro.Project.getActiveProject();
   if (!project || selection?.projectId !== project.guid.toString() || typeof selection.id !== "string") {
@@ -170,6 +171,22 @@ async function openProjectSource(ppro: premierepro, value: unknown) {
   if ((await ppro.Project.getActiveProject())?.guid.toString() !== selection.projectId) {
     throw new Error("The active project changed. Search the project again.");
   }
+  return { project, projectId: selection.projectId, item, sequence, lookup };
+}
+
+async function projectAudioPath(ppro: premierepro, value: unknown) {
+  const { projectId, item, sequence } = await resolveProjectSource(ppro, value);
+  if (sequence) throw new Error("Select an audio file to preview.");
+  const path = await ppro.ClipProjectItem.cast(item).getMediaFilePath();
+  if (!audioExtension.test(path)) throw new Error("Select an audio file to preview.");
+  if ((await ppro.Project.getActiveProject())?.guid.toString() !== projectId) {
+    throw new Error("The active project changed. Search the project again.");
+  }
+  return { path };
+}
+
+async function openProjectSource(ppro: premierepro, value: unknown) {
+  const { project, item, sequence, lookup } = await resolveProjectSource(ppro, value);
   if (sequence) {
     if (!await project.openSequence(sequence)) throw new Error(`Premiere could not open ${item.name} in the timeline.`);
     return { lookup, message: `Opened ${item.name} in the timeline.` };
@@ -467,6 +484,8 @@ export async function runCommand(ppro: premierepro, command: unknown, value: unk
       return insertProjectMedia(ppro, value);
     case "open-project-source":
       return openProjectSource(ppro, value);
+    case "project-audio-path":
+      return projectAudioPath(ppro, value);
     case "remove-attributes":
     case "set-opacity":
     case "set-volume":

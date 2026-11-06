@@ -133,6 +133,18 @@ test("project search indexes media and sequences by name and bin path and exclud
   assert.equal(searchProjectMedia(indexProjectMedia(catalog.items), "interviews")[0].mediaType, "bin");
 });
 
+test("audio preview resolves the active project's audio file without opening the Source Monitor", async () => {
+  const { host, media, opened, switchProject } = fixture();
+  const selection = { projectId: "project", id: "media" };
+  await assert.rejects(runCommand(host, "project-audio-path", selection), /Select an audio file/);
+  const path = "D:/Sounds/Click.wav";
+  media.getMediaFilePath = async () => path;
+  assert.deepEqual(await runCommand(host, "project-audio-path", selection), { path });
+  assert.deepEqual(opened, []);
+  switchProject();
+  await assert.rejects(runCommand(host, "project-audio-path", selection), /active project changed/);
+});
+
 test("project catalog reuses the current revision and rescans on edits or project switches", async () => {
   const { host, media, switchProject } = fixture();
   let scans = 0;

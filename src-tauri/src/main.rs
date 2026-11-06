@@ -95,10 +95,54 @@ fn dismiss_palette(app: tauri::AppHandle, restore_focus: bool) {
     if let Some(window) = app.get_webview_window("palette") {
         let was_focused = window.is_focused().unwrap_or(false);
         let _ = window.hide();
+        let _ = window.emit("palette-closed", ());
         if restore_focus && was_focused {
             platform::restore_focus(app.state::<FocusTarget>().0.load(Ordering::Relaxed));
         }
     }
+}
+
+#[tauri::command]
+async fn preview_project_audio(
+    project_id: String,
+    id: String,
+    state: tauri::State<'_, Arc<bridge::Bridge>>,
+) -> Result<tauri::ipc::Response, String> {
+    let source = state.request("palette-command", serde_json::json!({
+        "action": "project-audio-path",
+        "value": { "projectId": project_id, "id": id },
+    })).await.map_err(|error| {
+        if error == "Unsupported Helm command." {
+            "The connected Helm Bridge is too old for audio preview. Reload or reinstall the updated bridge in Premiere.".to_string()
+        } else {
+            error
+        }
+    })?;
+    let path = source.get("path").and_then(serde_json::Value::as_str)
+        .ok_or("Premiere did not return an audio file.")?.to_owned();
+    tauri::async_runtime::spawn_blocking(move || {
+        use std::io::Read;
+
+        const MAX_BYTES: u64 = 64 * 1024 * 1024;
+        let path = std::path::Path::new(&path);
+        let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or_default().to_ascii_lowercase();
+        if !path.is_absolute() || !matches!(extension.as_str(),
+            "wav" | "mp3" | "aac" | "m4a" | "aif" | "aiff" | "flac" | "ogg" | "opus" | "wma" | "ac3")
+        {
+            return Err("Premiere did not return a local audio file.".into());
+        }
+        let file = std::fs::File::open(path).map_err(|error| format!("Could not open the audio file: {error}"))?;
+        let metadata = file.metadata().map_err(|error| error.to_string())?;
+        if !metadata.is_file() || metadata.len() > MAX_BYTES {
+            return Err("Audio preview requires a file of 64 MB or smaller.".into());
+        }
+        let mut bytes = Vec::new();
+        file.take(MAX_BYTES + 1).read_to_end(&mut bytes).map_err(|error| format!("Could not read the audio file: {error}"))?;
+        if bytes.len() as u64 > MAX_BYTES {
+            return Err("Audio preview requires a file of 64 MB or smaller.".into());
+        }
+        Ok(tauri::ipc::Response::new(bytes))
+    }).await.map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -397,6 +441,7 @@ fn main() {
             effect_shortcuts::set_effect_shortcut_recording,
             refresh_catalog,
             run_palette_command,
+            preview_project_audio,
             get_presets,
             apply_preset,
             set_shortcut,
