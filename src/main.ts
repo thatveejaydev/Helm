@@ -19,6 +19,15 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
       <span id="insert-hint" hidden>Enter inserts · Shift+Enter opens item · v2: a2: prefers tracks</span>
     </div>
     <div id="results" role="listbox" aria-label="Palette results"></div>
+    <div id="project-skeleton" aria-hidden="true" hidden>
+      ${Array.from({ length: 3 }, () => `
+        <div class="effect-row skeleton-row">
+          <span class="effect-icon"></span>
+          <span class="skeleton-title"></span>
+          <span class="skeleton-subtitle"></span>
+        </div>
+      `).join("")}
+    </div>
     <div id="empty" class="empty" hidden><span class="empty-symbol">⌕</span><h2 id="empty-title"></h2><p id="empty-message"></p><button id="setup-button" class="secondary" hidden>Connect to Premiere</button></div>
   </section>
   <section id="settings" aria-labelledby="settings-title" hidden>
@@ -37,7 +46,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
     <section class="settings-group">
       <h2>Keyboard shortcut</h2>
       <div class="settings-row">
-        <span>Open Helm while editing</span>
+        <span>Open Helm floating palette</span>
         <div class="shortcut-controls"><button id="record-shortcut" class="shortcut-button" type="button" aria-label="Change shortcut" title="Click to record a new shortcut"><kbd id="shortcut">Ctrl + Alt + Space</kbd></button><button id="reset-shortcut" class="shortcut-reset" type="button" aria-label="Reset to default shortcut" title="Reset to default (Ctrl + Alt + Space)">↺</button></div>
       </div>
     </section>
@@ -357,7 +366,11 @@ function render(): void {
   projectPerformance.resultRenders++;
   scheduleProjectPerformanceUpdate();
   const query = input.value;
+  const connected = snapshot?.connected;
   const currentProject = projectId;
+  const showProjectSkeleton = searchMode === "project" && connected === true && currentProject === undefined && !projectError;
+  element("project-skeleton").hidden = !showProjectSkeleton;
+  results.setAttribute("aria-busy", String(showProjectSkeleton));
   const bin = binStack.at(-1);
   const hasQuery = Boolean(query.trim());
   const tree = browsingProjectTree();
@@ -429,16 +442,15 @@ function render(): void {
     if (current !== row) results.insertBefore(row, current);
   }
   input.setAttribute("aria-activedescendant", visible.length ? `effect-${selected}` : "");
-  element("empty").hidden = visible.length > 0;
-  if (!visible.length) {
-    const connected = snapshot?.connected;
+  const showEmpty = !visible.length && !showProjectSkeleton;
+  element("empty").hidden = !showEmpty;
+  if (showEmpty) {
     const noMatches = searchMode === "actions" || searchMode === "commands" || index.length;
     element("empty-title").textContent = noMatches ? "No matching results" : connected ? "Getting your effects…" : "Connect to Premiere";
     element("empty-message").textContent = noMatches ? "Try a shorter name." : connected ? "Reading the effects installed in Premiere." : "Connect the Helm Bridge panel in Premiere to get started.";
     element("setup-button").hidden = !!connected;
     if (searchMode === "project" && connected) {
-      element("empty-title").textContent = projectLoading ? "Reading project media…" :
-        projectError ? "Project search unavailable" :
+      element("empty-title").textContent = projectError ? "Project search unavailable" :
         !hasQuery ? bin ? "This bin is empty" : "No project bins" :
         projectIndex.length ? "No matching media" : "No imported media found";
       element("empty-message").textContent = projectError || (hasQuery && projectIndex.length ? "Try a clip name or bin path." : "");
