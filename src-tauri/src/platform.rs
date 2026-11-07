@@ -1,6 +1,78 @@
 #[cfg(windows)]
+fn is_premiere_pid(pid: u32, check_alive: bool) -> bool {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, WAIT_TIMEOUT},
+        System::Threading::*,
+    };
+    if pid == 0 {
+        return false;
+    }
+    unsafe {
+        let access = PROCESS_QUERY_LIMITED_INFORMATION
+            | if check_alive { PROCESS_SYNCHRONIZE } else { 0 };
+        let process = OpenProcess(access, 0, pid);
+        if process.is_null() {
+            return false;
+        }
+        let alive = !check_alive || WaitForSingleObject(process, 0) == WAIT_TIMEOUT;
+        let mut path = [0u16; 1024];
+        let mut length = path.len() as u32;
+        let success =
+            alive && QueryFullProcessImageNameW(process, 0, path.as_mut_ptr(), &mut length) != 0;
+        CloseHandle(process);
+        if !success {
+            return false;
+        }
+        String::from_utf16_lossy(&path[..length as usize])
+            .to_ascii_lowercase()
+            .ends_with("\\adobe premiere pro.exe")
+    }
+}
+
+#[cfg(windows)]
+pub fn is_premiere_process_alive(pid: u32) -> bool {
+    is_premiere_pid(pid, true)
+}
+
+#[cfg(windows)]
+pub fn premiere_pids() -> std::collections::HashSet<u32> {
+    use std::collections::HashSet;
+    use windows_sys::Win32::{
+        Foundation::{HWND, LPARAM},
+        UI::WindowsAndMessaging::*,
+    };
+
+    struct PidScan {
+        checked: HashSet<u32>,
+        found: HashSet<u32>,
+    }
+
+    unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> i32 {
+        let state = &mut *(lparam as *mut PidScan);
+        if IsWindowVisible(hwnd) == 0 {
+            return 1;
+        }
+        let mut pid = 0;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if pid != 0 && state.checked.insert(pid) && is_premiere_pid(pid, true) {
+            state.found.insert(pid);
+        }
+        1
+    }
+
+    let mut state = PidScan {
+        checked: HashSet::new(),
+        found: HashSet::new(),
+    };
+    unsafe {
+        EnumWindows(Some(enum_proc), &mut state as *mut _ as LPARAM);
+    }
+    state.found
+}
+
+#[cfg(windows)]
 pub fn foreground_premiere() -> Option<isize> {
-    use windows_sys::Win32::{System::Threading::*, UI::WindowsAndMessaging::*};
+    use windows_sys::Win32::UI::WindowsAndMessaging::*;
     unsafe {
         let window = GetForegroundWindow();
         if window.is_null() {
@@ -8,16 +80,7 @@ pub fn foreground_premiere() -> Option<isize> {
         }
         let mut pid = 0;
         GetWindowThreadProcessId(window, &mut pid);
-        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if process.is_null() {
-            return None;
-        }
-        let mut path = [0u16; 1024];
-        let mut length = path.len() as u32;
-        let success = QueryFullProcessImageNameW(process, 0, path.as_mut_ptr(), &mut length);
-        windows_sys::Win32::Foundation::CloseHandle(process);
-        let path = String::from_utf16_lossy(&path[..length as usize]).to_ascii_lowercase();
-        (success != 0 && path.ends_with("\\adobe premiere pro.exe")).then_some(window as isize)
+        is_premiere_pid(pid, false).then_some(window as isize)
     }
 }
 
@@ -25,7 +88,6 @@ pub fn foreground_premiere() -> Option<isize> {
 pub fn find_premiere_window() -> Option<isize> {
     use windows_sys::Win32::{
         Foundation::{HWND, LPARAM},
-        System::Threading::*,
         UI::WindowsAndMessaging::*,
     };
 
@@ -40,20 +102,9 @@ pub fn find_premiere_window() -> Option<isize> {
         }
         let mut pid = 0;
         GetWindowThreadProcessId(hwnd, &mut pid);
-        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if process.is_null() {
-            return 1;
-        }
-        let mut path = [0u16; 1024];
-        let mut length = path.len() as u32;
-        let success = QueryFullProcessImageNameW(process, 0, path.as_mut_ptr(), &mut length);
-        windows_sys::Win32::Foundation::CloseHandle(process);
-        if success != 0 {
-            let path_str = String::from_utf16_lossy(&path[..length as usize]).to_ascii_lowercase();
-            if path_str.ends_with("\\adobe premiere pro.exe") {
-                state.found = Some(hwnd);
-                return 0;
-            }
+        if is_premiere_pid(pid, false) {
+            state.found = Some(hwnd);
+            return 0;
         }
         1
     }
@@ -117,6 +168,14 @@ pub fn style_window(hwnd: isize) {
 }
 
 // The bridge and UI are portable. macOS foreground integration is a separate milestone.
+#[cfg(not(windows))]
+pub fn is_premiere_process_alive(_: u32) -> bool {
+    false
+}
+#[cfg(not(windows))]
+pub fn premiere_pids() -> std::collections::HashSet<u32> {
+    std::collections::HashSet::new()
+}
 #[cfg(not(windows))]
 pub fn foreground_premiere() -> Option<isize> {
     Some(0)

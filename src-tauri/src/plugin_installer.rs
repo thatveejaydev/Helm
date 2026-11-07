@@ -23,14 +23,6 @@ pub fn find_upia() -> Option<PathBuf> {
 }
 
 pub fn find_ccx(app: &tauri::AppHandle) -> Option<PathBuf> {
-    #[cfg(debug_assertions)]
-    {
-        let dev_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../uxp/dist/helm-bridge.ccx");
-        if dev_path.exists() {
-            return dev_path.canonicalize().ok().or(Some(dev_path));
-        }
-    }
-
     if let Ok(resource_dir) = app.path().resource_dir() {
         let res_path = resource_dir.join("premiere-plugin").join("helm-bridge.ccx");
         if res_path.exists() {
@@ -47,6 +39,11 @@ pub fn find_ccx(app: &tauri::AppHandle) -> Option<PathBuf> {
         if direct_res.exists() {
             return direct_res.canonicalize().ok().or(Some(direct_res));
         }
+    }
+
+    let dev_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../uxp/dist/helm-bridge.ccx");
+    if dev_path.exists() {
+        return dev_path.canonicalize().ok().or(Some(dev_path));
     }
 
     None
@@ -121,6 +118,11 @@ pub fn install_plugin(app: &tauri::AppHandle) -> Result<InstallResult, String> {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+        let _ = Command::new(&upia_path)
+            .args(["/remove", "Helm Bridge"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+
         let output = Command::new(&upia_path)
             .args(["/install", ccx_abs])
             .creation_flags(CREATE_NO_WINDOW)
@@ -131,6 +133,9 @@ pub fn install_plugin(app: &tauri::AppHandle) -> Result<InstallResult, String> {
         let stderr = String::from_utf8_lossy(&output.stderr);
 
         if output.status.success() || stdout.to_lowercase().contains("successful") {
+            if let Some(bridge) = app.try_state::<std::sync::Arc<crate::bridge::Bridge>>() {
+                bridge.publish_session_now();
+            }
             Ok(InstallResult {
                 success: true,
                 message: "Helm Bridge successfully installed into Premiere Pro.".into(),
@@ -146,5 +151,40 @@ pub fn install_plugin(app: &tauri::AppHandle) -> Result<InstallResult, String> {
     #[cfg(not(windows))]
     {
         Err("Automated UPIA install is currently supported on Windows.".to_string())
+    }
+}
+
+pub fn ensure_latest_plugin_installed(app: &tauri::AppHandle) {
+    #[cfg(windows)]
+    {
+        let Some(ccx_path) = find_ccx(app) else {
+            return;
+        };
+        let bundled_version = ccx_path
+            .parent()
+            .map(|dir| dir.join("manifest.json"))
+            .and_then(|manifest| std::fs::read_to_string(manifest).ok())
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .and_then(|val| val.get("version").and_then(serde_json::Value::as_str).map(String::from))
+            .unwrap_or_else(|| "0.1.5".to_string());
+
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            let installed_manifest = PathBuf::from(appdata)
+                .join("Adobe")
+                .join("UXP")
+                .join("Plugins")
+                .join("External")
+                .join(format!("is.helm.palette.bridge_{bundled_version}"))
+                .join("manifest.json");
+            if installed_manifest.exists() {
+                return;
+            }
+        }
+
+        let _ = install_plugin(app);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = app;
     }
 }

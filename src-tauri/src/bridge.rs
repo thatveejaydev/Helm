@@ -4,7 +4,10 @@ use serde_json::{json, Value};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
     time::Duration,
 };
 use tauri::Emitter;
@@ -46,7 +49,8 @@ struct Request {
 
 pub struct Bridge {
     snapshot: Mutex<Snapshot>,
-    sender: Mutex<Option<mpsc::Sender<Request>>>,
+    sender: Mutex<Option<(u64, mpsc::Sender<Request>)>>,
+    next_connection_id: AtomicU64,
     busy: tokio::sync::Mutex<()>,
     root: PathBuf,
     pairing_key: String,
@@ -69,7 +73,7 @@ impl Bridge {
             Ok(s) if !s.trim().is_empty() => s.trim().to_string(),
             _ => default_shortcut.to_string(),
         };
-        Ok(Self {
+        let bridge = Self {
             snapshot: Mutex::new(Snapshot {
                 connected: false,
                 effects: vec![],
@@ -78,10 +82,27 @@ impl Bridge {
                 shortcut,
             }),
             sender: Mutex::new(None),
+            next_connection_id: AtomicU64::new(0),
             busy: tokio::sync::Mutex::new(()),
             root,
             pairing_key,
+        };
+        bridge.publish_session_now();
+        Ok(bridge)
+    }
+
+    pub fn publish_session_now(&self) {
+        let Some(roaming) = std::env::var_os("APPDATA") else { return };
+        let storage = PathBuf::from(roaming).join("Adobe/UXP/PluginsStorage/PPRO");
+        let executable = crate::autostart::preferred_helm_executable()
+            .and_then(|path| path.to_str().map(str::to_owned));
+        let session = json!({
+            "port": PORT,
+            "token": self.pairing_key,
+            "executable": executable,
         })
+        .to_string();
+        publish_session(&storage, session.as_bytes());
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -123,7 +144,8 @@ impl Bridge {
             .sender
             .lock()
             .unwrap()
-            .clone()
+            .as_ref()
+            .map(|(_, sender)| sender.clone())
             .ok_or("Connect the Helm panel in Premiere first.")?;
         let id = uuid::Uuid::new_v4().to_string();
         let (reply, result) = oneshot::channel();
@@ -161,8 +183,9 @@ fn publish_session(storage: &Path, session: &[u8]) {
             continue;
         }
         for channel in ["Developer", "External", "Shared"] {
-            let plugin_root = version.path().join(channel).join("is.helm.palette.bridge");
-            if !plugin_root.is_dir() {
+            let channel_root = version.path().join(channel);
+            let plugin_root = channel_root.join("is.helm.palette.bridge");
+            if !plugin_root.is_dir() && !(channel != "Shared" && channel_root.is_dir()) {
                 continue;
             }
             let directory = plugin_root.join("PluginData");
@@ -190,17 +213,14 @@ pub async fn serve(app: tauri::AppHandle, bridge: Arc<Bridge>) {
             return;
         }
     };
-    if let Some(roaming) = std::env::var_os("APPDATA") {
-        let storage = PathBuf::from(roaming).join("Adobe/UXP/PluginsStorage/PPRO");
-        let session = json!({ "port": PORT, "token": bridge.pairing_key }).to_string();
-        tauri::async_runtime::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(5));
-            loop {
-                interval.tick().await;
-                publish_session(&storage, session.as_bytes());
-            }
-        });
-    }
+    let publisher = bridge.clone();
+    tauri::async_runtime::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            publisher.publish_session_now();
+        }
+    });
     // Authenticate sockets concurrently so an idle, unauthenticated socket cannot block Premiere.
     while let Ok((stream, _)) = listener.accept().await {
         let app = app.clone();
@@ -250,12 +270,10 @@ async fn connection(
         return Err("Authentication rejected".into());
     }
     let (sender, mut outgoing) = mpsc::channel::<Request>(8);
+    let connection_id = bridge.next_connection_id.fetch_add(1, Ordering::Relaxed) + 1;
     {
         let mut current = bridge.sender.lock().unwrap();
-        if current.is_some() {
-            return Err("A Premiere bridge is already connected".into());
-        }
-        *current = Some(sender);
+        *current = Some((connection_id, sender));
     }
     {
         let mut state = bridge.snapshot.lock().unwrap();
@@ -264,6 +282,7 @@ async fn connection(
         state.error = None;
     }
     bridge.emit(&app);
+    crate::effect_shortcuts::sync_registration(&app);
     let mut pending: HashMap<String, oneshot::Sender<Result<Value, String>>> = HashMap::new();
     let run = async {
         socket.send(Message::text("{\"type\":\"welcome\",\"protocol\":1}")).await.map_err(|e| e.to_string())?;
@@ -327,16 +346,28 @@ async fn connection(
         }
         Ok::<(), String>(())
     }.await;
-    *bridge.sender.lock().unwrap() = None;
-    bridge.snapshot.lock().unwrap().connected = false;
+    let is_active = {
+        let mut current = bridge.sender.lock().unwrap();
+        if current.as_ref().is_some_and(|(id, _)| *id == connection_id) {
+            *current = None;
+            true
+        } else {
+            false
+        }
+    };
     for (_, reply) in pending {
         let _ = reply.send(Err(
             "Premiere disconnected. Check the timeline before retrying.".into(),
         ));
     }
-    if let Err(error) = &run {
-        bridge.snapshot.lock().unwrap().error = Some(error.clone());
+    if is_active {
+        let mut state = bridge.snapshot.lock().unwrap();
+        state.connected = false;
+        if let Err(error) = &run {
+            state.error = Some(error.clone());
+        }
+        drop(state);
+        bridge.emit(&app);
     }
-    bridge.emit(&app);
     run
 }

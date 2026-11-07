@@ -95,19 +95,20 @@ fn intercepts_typing(shortcut: Shortcut) -> bool {
 }
 
 #[cfg(windows)]
-fn sync_registration(app: &AppHandle) {
+pub(crate) fn sync_registration(app: &AppHandle) {
     use tauri::Emitter;
 
     let active = premiere_is_active();
     if !active {
         crate::cursor_lock::release();
     }
-    let palette = app
-        .state::<std::sync::Arc<crate::bridge::Bridge>>()
-        .shortcut()
-        .parse::<Shortcut>()
-        .ok();
-    let state = app.state::<EffectShortcuts>();
+    let Some(bridge) = app.try_state::<std::sync::Arc<crate::bridge::Bridge>>() else {
+        return;
+    };
+    let palette = bridge.shortcut().parse::<Shortcut>().ok();
+    let Some(state) = app.try_state::<EffectShortcuts>() else {
+        return;
+    };
     let bindings = state.bindings.lock().unwrap().clone();
     let manager = app.global_shortcut();
     for accelerator in bindings.values() {
@@ -190,6 +191,9 @@ fn watch_foreground(app: &AppHandle) -> Result<(), String> {
     sync_registration(app);
     Ok(())
 }
+
+#[cfg(not(windows))]
+pub(crate) fn sync_registration(_: &AppHandle) {}
 
 #[cfg(not(windows))]
 fn watch_foreground(_: &AppHandle) -> Result<(), String> {

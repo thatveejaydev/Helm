@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod autostart;
 mod bridge;
 #[cfg(windows)]
 mod cursor_lock;
@@ -368,9 +369,19 @@ async fn install_premiere_plugin(app: tauri::AppHandle) -> Result<plugin_install
 }
 
 fn main() {
+    if let Some(watcher_id) = autostart::watcher_mode_from_args() {
+        autostart::run_watcher(watcher_id);
+        return;
+    }
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
-            show_palette(app, platform::foreground_premiere())
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _| {
+            if let Some(bridge) = app.try_state::<Arc<bridge::Bridge>>() {
+                bridge.publish_session_now();
+            }
+            effect_shortcuts::sync_registration(app);
+            if autostart::should_show_palette_on_activation(&argv) {
+                show_palette(app, platform::foreground_premiere());
+            }
         }))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
@@ -465,6 +476,17 @@ fn main() {
             app.manage(bridge.clone());
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(bridge::serve(handle, bridge.clone()));
+            autostart::setup(app.handle(), bridge.clone());
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    plugin_installer::ensure_latest_plugin_installed(&handle);
+                });
+            }
+            let startup_args: Vec<String> = std::env::args().collect();
+            if autostart::should_show_palette_on_activation(&startup_args) {
+                show_palette(app.handle(), platform::foreground_premiere());
+            }
             if let Ok(documents) = app.path().document_dir() {
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
@@ -504,7 +526,7 @@ fn main() {
             let show = MenuItem::with_id(app, "show", "Open Helm", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit Helm", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &quit])?;
-            let mut tray = TrayIconBuilder::new()
+            let mut tray = TrayIconBuilder::with_id("helm-tray")
                 .tooltip("Helm · Premiere effect palette")
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {

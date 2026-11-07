@@ -4,7 +4,7 @@ import { applyEffect, applyPreset, discoverEffects, isAudio, isVideo, selectedCl
 import { clearProjectLookup, readProjectCatalog, runCommand } from "./commands";
 
 const ppro = require("premierepro") as premierepro;
-const { entrypoints, storage } = require("uxp");
+const { entrypoints, storage, shell } = require("uxp");
 
 let socket: WebSocket | undefined;
 let reconnect: ReturnType<typeof setTimeout> | undefined;
@@ -18,11 +18,35 @@ let statusText = "Waiting for the Helm desktop app…";
 let bindPending = false;
 let projectRevision = 0;
 let projectScanRunning = false;
+let launchAttempted = false;
+let failedConnects = 0;
+
+async function launchHelm(executable?: unknown): Promise<void> {
+  if (launchAttempted) return;
+  launchAttempted = true;
+  try {
+    if (typeof executable === "string" && executable && typeof shell?.openPath === "function") {
+      await shell.openPath(executable);
+      return;
+    }
+  } catch { /* Fall back to protocol handler. */ }
+  try {
+    if (typeof shell?.openExternal === "function") {
+      await shell.openExternal("helm://launch");
+    }
+  } catch { /* Helm may be started by its background watcher or manually. */ }
+}
 
 function notifyProjectChange(reset: boolean): void {
   projectRevision++;
   if (reset) clearProjectLookup(ppro);
   if (socket && authenticated) send(socket, { type: "project-catalog-changed", reset });
+  else if (!socket && running) {
+    clearTimeout(reconnect);
+    reconnect = undefined;
+    retryMs = 750;
+    void connect();
+  }
 }
 
 const projectActivated = () => notifyProjectChange(true);
@@ -141,7 +165,7 @@ function scheduleReconnect(): void {
 
 async function connect(): Promise<void> {
   const attempt = generation;
-  let session: { port?: unknown; token?: unknown } | null = null;
+  let session: { port?: unknown; token?: unknown; executable?: unknown } | null = null;
   try {
     const folder = await storage.localFileSystem.getDataFolder();
     const file = await folder.getEntry("helm-session.json");
@@ -153,7 +177,7 @@ async function connect(): Promise<void> {
     scheduleReconnect();
     return;
   }
-  const { port, token } = session;
+  const { port, token, executable } = session;
   let connection: WebSocket;
   try { connection = new WebSocket(`ws://localhost:${port}`); }
   catch (error) {
@@ -177,6 +201,8 @@ async function connect(): Promise<void> {
       connection.close();
     } else if (message.type === "welcome" && message.protocol === 1 && !authenticated) {
       authenticated = true;
+      launchAttempted = true;
+      failedConnects = 0;
       retryMs = 750;
       void publishCatalog(connection).catch((error) => {
         const detail = `Could not read Premiere effects. ${errorMessage(error)}`;
@@ -194,6 +220,13 @@ async function connect(): Promise<void> {
     if (socket !== connection) return;
     socket = undefined;
     authenticated = false;
+    if (!authenticated && !rejected) {
+      failedConnects++;
+      if (failedConnects >= 2) {
+        retryMs = 750;
+        void launchHelm(executable);
+      }
+    }
     status(rejected ? statusText : "Waiting for the Helm desktop app…");
     scheduleReconnect();
   };
