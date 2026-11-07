@@ -30,6 +30,9 @@ const EXPANDED_HEIGHT: f64 = 566.0;
 struct FocusTarget(AtomicIsize);
 
 fn show_palette(app: &tauri::AppHandle, target: Option<isize>) {
+    if !platform::is_premiere_running() {
+        return;
+    }
     let Some(window) = app.get_webview_window("palette") else {
         return;
     };
@@ -57,6 +60,7 @@ fn show_palette(app: &tauri::AppHandle, target: Option<isize>) {
     let _ = window.set_size(tauri::LogicalSize::new(PALETTE_WIDTH, COMPACT_HEIGHT));
     let _ = window.show();
     let _ = window.set_focus();
+    effect_shortcuts::sync_registration(app);
     let _ = window.emit("palette-opened", ());
 }
 
@@ -100,6 +104,7 @@ fn dismiss_palette(app: tauri::AppHandle, restore_focus: bool) {
         if restore_focus && was_focused {
             platform::restore_focus(app.state::<FocusTarget>().0.load(Ordering::Relaxed));
         }
+        effect_shortcuts::sync_registration(&app);
     }
 }
 
@@ -337,13 +342,16 @@ fn set_shortcut(
     let _ = app.global_shortcut().unregister(current.as_str());
 
     if let Err(err) = app.global_shortcut().register(shortcut.as_str()) {
-        let _ = app.global_shortcut().register(current.as_str());
+        effect_shortcuts::sync_registration(&app);
         return Err(format!("Could not register shortcut '{shortcut}': {err}"));
     }
 
-    state
-        .update_shortcut(&app, shortcut.clone())
-        .map_err(|e| format!("Failed to save shortcut: {e}"))?;
+    if let Err(e) = state.update_shortcut(&app, shortcut.clone()) {
+        let _ = app.global_shortcut().unregister(shortcut.as_str());
+        effect_shortcuts::sync_registration(&app);
+        return Err(format!("Failed to save shortcut: {e}"));
+    }
+    effect_shortcuts::sync_registration(&app);
 
     Ok(shortcut)
 }
@@ -371,6 +379,13 @@ async fn install_premiere_plugin(app: tauri::AppHandle) -> Result<plugin_install
 fn main() {
     if let Some(watcher_id) = autostart::watcher_mode_from_args() {
         autostart::run_watcher(watcher_id);
+        return;
+    }
+    let started_from_autostart = std::env::args()
+        .any(|arg| arg == autostart::AUTOSTART_ARG || arg.starts_with("helm://"));
+    if !autostart::should_allow_startup(platform::is_premiere_running(), started_from_autostart) {
+        autostart::ensure_watcher_and_integration();
+        plugin_installer::ensure_latest_plugin_installed_headless();
         return;
     }
     tauri::Builder::default()
@@ -504,20 +519,12 @@ fn main() {
                 });
             }
             let shortcut = bridge.snapshot().shortcut;
-            if let Err(error) = app.global_shortcut().register(shortcut.as_str()) {
-                let mut reset_fallback = false;
-                if shortcut != DEFAULT_SHORTCUT {
-                    if app.global_shortcut().register(DEFAULT_SHORTCUT).is_ok() {
-                        let _ = bridge.update_shortcut(app.handle(), DEFAULT_SHORTCUT.to_string());
-                        reset_fallback = true;
-                    }
-                }
-                let message = if reset_fallback {
-                    format!("Could not register '{shortcut}': {error}. Reset to {DEFAULT_SHORTCUT}.")
-                } else {
-                    format!("Could not register {shortcut}: {error}. Open Helm from the tray.")
-                };
-                bridge.set_error(app.handle(), message);
+            if shortcut.parse::<Shortcut>().is_err() {
+                let _ = bridge.update_shortcut(app.handle(), DEFAULT_SHORTCUT.to_string());
+                bridge.set_error(
+                    app.handle(),
+                    format!("Invalid saved shortcut '{shortcut}'. Reset to {DEFAULT_SHORTCUT}."),
+                );
             }
             let errors = effect_shortcuts::EffectShortcuts::load(app.handle(), bindings_path);
             if !errors.is_empty() {
@@ -547,8 +554,9 @@ fn main() {
                     let _ = window.hide();
                 }
             }
-            tauri::WindowEvent::Focused(false) => {
-                if window.label() == "palette" && window.is_visible().unwrap_or(false) {
+            tauri::WindowEvent::Focused(focused) => {
+                effect_shortcuts::sync_registration(window.app_handle());
+                if !focused && window.label() == "palette" && window.is_visible().unwrap_or(false) {
                     let win = window.clone();
                     tauri::async_runtime::spawn(async move {
                         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -557,6 +565,7 @@ fn main() {
                                 let _ = win.hide();
                             }
                         }
+                        effect_shortcuts::sync_registration(win.app_handle());
                     });
                 }
             }

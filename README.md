@@ -4,7 +4,7 @@ Helm is a keyboard palette for Premiere Pro 25.6 and later. Press **Ctrl + Alt +
 
 ## Set up on Windows
 
-Run `src-tauri/target/release/helm.exe` from the workspace, or use the installer under `src-tauri/target/release/bundle/nsis`. The built app requires WebView2. Helm starts quietly in the system tray (the palette stays hidden until you press your shortcut), automatically launches or activates whenever Adobe Premiere Pro opens, and exits automatically when Premiere Pro closes.
+Run `src-tauri/target/release/helm.exe` from the workspace, or use the installer under `src-tauri/target/release/bundle/nsis`. The built app requires WebView2. Helm only runs while Adobe Premiere Pro is open: it automatically launches quietly in the system tray (with the palette hidden until you press your shortcut) whenever Premiere Pro opens, and exits automatically when Premiere Pro closes.
 
 ### Automatic Bridge Installation (Recommended)
 1. Launch Helm and open **Settings** (⚙).

@@ -200,41 +200,46 @@ fn is_watcher_locked(_: &Path) -> bool {
     false
 }
 
+pub fn ensure_watcher_and_integration() {
+    let Some(current_exe) = std::env::current_exe().ok() else { return };
+    let launch_exe = resolve_launch_executable(&current_exe);
+    let dir = state_dir();
+    let _ = fs::create_dir_all(&dir);
+    let config_path = dir.join("watcher-config.json");
+    let lock_path = dir.join("watcher.lock");
+    let target_exe_str = launch_exe.to_string_lossy().into_owned();
+
+    register_windows_integration(&launch_exe);
+
+    if is_watcher_locked(&lock_path)
+        && read_config(&config_path).is_some_and(|cfg| cfg.executable == target_exe_str)
+    {
+        return;
+    }
+
+    let watcher_id = uuid::Uuid::new_v4().to_string();
+    let config = WatcherConfig {
+        executable: target_exe_str,
+        watcher_id: watcher_id.clone(),
+    };
+    if let Ok(json) = serde_json::to_vec(&config) {
+        let temp_path = dir.join("watcher-config.tmp");
+        let _ = fs::write(&temp_path, json).and_then(|()| fs::rename(&temp_path, &config_path));
+    }
+    spawn_detached(&launch_exe, &[WATCH_ARG, &watcher_id]);
+}
+
+pub fn should_allow_startup(premiere_running: bool, started_from_autostart: bool) -> bool {
+    premiere_running || started_from_autostart
+}
+
 pub fn setup(app: &tauri::AppHandle, bridge: Arc<crate::bridge::Bridge>) {
-    tauri::async_runtime::spawn_blocking(|| {
-        let Some(current_exe) = std::env::current_exe().ok() else { return };
-        let launch_exe = resolve_launch_executable(&current_exe);
-        let dir = state_dir();
-        let _ = fs::create_dir_all(&dir);
-        let config_path = dir.join("watcher-config.json");
-        let lock_path = dir.join("watcher.lock");
-        let target_exe_str = launch_exe.to_string_lossy().into_owned();
-
-        register_windows_integration(&launch_exe);
-
-        if is_watcher_locked(&lock_path)
-            && read_config(&config_path).is_some_and(|cfg| cfg.executable == target_exe_str)
-        {
-            return;
-        }
-
-        let watcher_id = uuid::Uuid::new_v4().to_string();
-        let config = WatcherConfig {
-            executable: target_exe_str,
-            watcher_id: watcher_id.clone(),
-        };
-        if let Ok(json) = serde_json::to_vec(&config) {
-            let temp_path = dir.join("watcher-config.tmp");
-            let _ = fs::write(&temp_path, json).and_then(|()| fs::rename(&temp_path, &config_path));
-        }
-        spawn_detached(&launch_exe, &[WATCH_ARG, &watcher_id]);
-    });
+    tauri::async_runtime::spawn_blocking(ensure_watcher_and_integration);
 
     let app = app.clone();
-    let started_from_autostart = std::env::args().any(|arg| arg == AUTOSTART_ARG || arg.starts_with("helm://"));
     tauri::async_runtime::spawn(async move {
         let mut seen_pids = crate::platform::premiere_pids();
-        let mut had_premiere = !seen_pids.is_empty();
+        let mut had_premiere = !seen_pids.is_empty() || crate::platform::is_premiere_running();
         let mut had_bridge = bridge.snapshot().connected;
         let mut empty_ticks: u32 = 0;
         let mut interval = tokio::time::interval(Duration::from_millis(500));
@@ -242,24 +247,26 @@ pub fn setup(app: &tauri::AppHandle, bridge: Arc<crate::bridge::Bridge>) {
             interval.tick().await;
             let app_handle = app.clone();
             let previous = seen_pids.clone();
-            let Ok((current_pids, has_visible_window, launched)) = tauri::async_runtime::spawn_blocking(move || {
-                let visible_pids = crate::platform::premiere_pids();
-                let has_visible_window = !visible_pids.is_empty();
-                let mut current = visible_pids;
-                for &pid in &previous {
-                    if crate::platform::is_premiere_process_alive(pid) {
-                        current.insert(pid);
+            let Ok((current_pids, has_visible_window, any_premiere_running, launched)) =
+                tauri::async_runtime::spawn_blocking(move || {
+                    let visible_pids = crate::platform::premiere_pids();
+                    let has_visible_window = !visible_pids.is_empty();
+                    let mut current = visible_pids;
+                    for &pid in &previous {
+                        if crate::platform::is_premiere_process_alive(pid) {
+                            current.insert(pid);
+                        }
                     }
-                }
-                let launched = current.iter().any(|pid| !previous.contains(pid));
-                (current, has_visible_window, launched)
-            })
-            .await
+                    let any_premiere_running = !current.is_empty() || crate::platform::is_premiere_running();
+                    let launched = current.iter().any(|pid| !previous.contains(pid));
+                    (current, has_visible_window, any_premiere_running, launched)
+                })
+                .await
             else {
                 continue;
             };
             let bridge_connected = bridge.snapshot().connected;
-            if !current_pids.is_empty() || bridge_connected {
+            if any_premiere_running || bridge_connected {
                 had_premiere = true;
                 empty_ticks = 0;
             } else {
@@ -270,11 +277,10 @@ pub fn setup(app: &tauri::AppHandle, bridge: Arc<crate::bridge::Bridge>) {
             }
             if should_exit_when_premiere_closes(
                 had_premiere,
-                current_pids.is_empty(),
+                !any_premiere_running,
                 had_bridge,
                 bridge_connected,
                 has_visible_window,
-                started_from_autostart,
                 empty_ticks,
             ) {
                 shutdown_helm(&app_handle);
@@ -295,7 +301,6 @@ fn should_exit_when_premiere_closes(
     had_bridge: bool,
     bridge_connected: bool,
     has_visible_window: bool,
-    started_from_autostart: bool,
     empty_ticks: u32,
 ) -> bool {
     if had_premiere && current_pids_empty {
@@ -304,7 +309,7 @@ fn should_exit_when_premiere_closes(
     if had_bridge && !bridge_connected && !has_visible_window {
         return true;
     }
-    if started_from_autostart && !had_premiere && empty_ticks >= 20 {
+    if !had_premiere && empty_ticks >= 20 {
         return true;
     }
     false
@@ -450,15 +455,23 @@ mod tests {
     #[test]
     fn exits_when_premiere_closes() {
         // Exits as soon as all Premiere processes exit after Premiere was seen.
-        assert!(should_exit_when_premiere_closes(true, true, false, false, false, false, 1));
+        assert!(should_exit_when_premiere_closes(true, true, false, false, false, 1));
         // Exits immediately when both the UXP bridge disconnects and Premiere's visible window closes.
-        assert!(should_exit_when_premiere_closes(true, false, true, false, false, false, 0));
+        assert!(should_exit_when_premiere_closes(true, false, true, false, false, 0));
         // Does not exit during splash-to-main-window transition before bridge connects while process is alive.
-        assert!(!should_exit_when_premiere_closes(true, false, false, false, false, true, 0));
+        assert!(!should_exit_when_premiere_closes(true, false, false, false, false, 0));
         // Does not exit when bridge reloads while Premiere window is still visible.
-        assert!(!should_exit_when_premiere_closes(true, false, true, false, true, false, 0));
+        assert!(!should_exit_when_premiere_closes(true, false, true, false, true, 0));
         // Exits if started via --autostart and Premiere never appeared within grace window.
-        assert!(!should_exit_when_premiere_closes(false, true, false, false, false, true, 5));
-        assert!(should_exit_when_premiere_closes(false, true, false, false, false, true, 20));
+        assert!(!should_exit_when_premiere_closes(false, true, false, false, false, 5));
+        assert!(should_exit_when_premiere_closes(false, true, false, false, false, 20));
+    }
+
+    #[test]
+    fn blocks_direct_startup_when_premiere_is_not_running() {
+        assert!(!should_allow_startup(false, false));
+        assert!(should_allow_startup(true, false));
+        assert!(should_allow_startup(false, true));
+        assert!(should_allow_startup(true, true));
     }
 }

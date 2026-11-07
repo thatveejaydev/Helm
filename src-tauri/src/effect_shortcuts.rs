@@ -66,6 +66,19 @@ fn premiere_is_active() -> bool {
     crate::platform::foreground_premiere().is_some_and(|window| window != 0)
 }
 
+fn palette_is_focused(app: &AppHandle) -> bool {
+    app.get_webview_window("palette")
+        .is_some_and(|window| window.is_focused().unwrap_or(false))
+}
+
+fn should_register_palette_shortcut(premiere_active: bool, palette_focused: bool) -> bool {
+    premiere_active || palette_focused
+}
+
+fn should_register_effect_shortcut(premiere_active: bool, shortcut: Shortcut) -> bool {
+    premiere_active && !intercepts_typing(shortcut)
+}
+
 fn intercepts_typing(shortcut: Shortcut) -> bool {
     if !shortcut.mods.is_empty() && shortcut.mods != Modifiers::SHIFT {
         return false;
@@ -99,18 +112,36 @@ pub(crate) fn sync_registration(app: &AppHandle) {
     use tauri::Emitter;
 
     let active = premiere_is_active();
+    let palette_focused = palette_is_focused(app);
     if !active {
         crate::cursor_lock::release();
     }
     let Some(bridge) = app.try_state::<std::sync::Arc<crate::bridge::Bridge>>() else {
         return;
     };
-    let palette = bridge.shortcut().parse::<Shortcut>().ok();
+    let manager = app.global_shortcut();
+    let palette_accelerator = bridge.shortcut();
+    let palette = palette_accelerator.parse::<Shortcut>().ok();
+    if let Some(palette_key) = palette {
+        let result = match (
+            should_register_palette_shortcut(active, palette_focused),
+            manager.is_registered(palette_key),
+        ) {
+            (true, false) => manager.register(palette_key),
+            (false, true) => manager.unregister(palette_key),
+            _ => Ok(()),
+        };
+        if let Err(error) = result {
+            let _ = app.emit(
+                "effect-shortcut-error",
+                format!("Could not update {palette_accelerator}: {error}"),
+            );
+        }
+    }
     let Some(state) = app.try_state::<EffectShortcuts>() else {
         return;
     };
     let bindings = state.bindings.lock().unwrap().clone();
-    let manager = app.global_shortcut();
     for accelerator in bindings.values() {
         let Ok(key) = accelerator.parse::<Shortcut>() else {
             continue;
@@ -119,7 +150,7 @@ pub(crate) fn sync_registration(app: &AppHandle) {
             continue;
         }
         let result = match (
-            active && !intercepts_typing(key),
+            should_register_effect_shortcut(active, key),
             manager.is_registered(key),
         ) {
             (true, false) => manager.register(key),
@@ -300,4 +331,26 @@ pub fn set_effect_shortcut(
     }
     *bindings = updated;
     Ok(bindings.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn palette_shortcut_only_registers_when_premiere_or_palette_is_active() {
+        assert!(!should_register_palette_shortcut(false, false));
+        assert!(should_register_palette_shortcut(true, false));
+        assert!(should_register_palette_shortcut(false, true));
+        assert!(should_register_palette_shortcut(true, true));
+    }
+
+    #[test]
+    fn effect_shortcuts_only_register_when_premiere_is_active_and_non_typing() {
+        let ctrl_space: Shortcut = "Ctrl+Space".parse().unwrap();
+        let shift_a: Shortcut = "Shift+A".parse().unwrap();
+        assert!(!should_register_effect_shortcut(false, ctrl_space));
+        assert!(should_register_effect_shortcut(true, ctrl_space));
+        assert!(!should_register_effect_shortcut(true, shift_a));
+    }
 }

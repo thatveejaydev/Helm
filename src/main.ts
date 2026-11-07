@@ -91,7 +91,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
       <div><div id="shortcut-dialog-label" class="eyebrow">EFFECT SHORTCUT</div><h2 id="effect-shortcut-name"></h2></div>
     </div>
     <div id="effect-shortcut-keys" class="shortcut-key-preview" aria-live="polite"></div>
-    <p class="shortcut-warning">This combination may override a Premiere shortcut. Windows reserves it while Helm is running.</p>
+    <p class="shortcut-warning">This combination may override a Premiere shortcut. Windows reserves it while Premiere Pro is active.</p>
     <p id="effect-shortcut-error" class="shortcut-error" role="alert"></p>
     <div class="shortcut-dialog-actions">
       <button id="remove-effect-shortcut" class="secondary" type="button" hidden>Remove</button>

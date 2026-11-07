@@ -22,11 +22,13 @@ pub fn find_upia() -> Option<PathBuf> {
     None
 }
 
-pub fn find_ccx(app: &tauri::AppHandle) -> Option<PathBuf> {
-    if let Ok(resource_dir) = app.path().resource_dir() {
-        let res_path = resource_dir.join("premiere-plugin").join("helm-bridge.ccx");
-        if res_path.exists() {
-            return res_path.canonicalize().ok().or(Some(res_path));
+pub fn find_ccx(app: Option<&tauri::AppHandle>) -> Option<PathBuf> {
+    if let Some(app) = app {
+        if let Ok(resource_dir) = app.path().resource_dir() {
+            let res_path = resource_dir.join("premiere-plugin").join("helm-bridge.ccx");
+            if res_path.exists() {
+                return res_path.canonicalize().ok().or(Some(res_path));
+            }
         }
     }
 
@@ -59,7 +61,7 @@ pub struct PluginStatus {
 
 pub fn check_plugin_status(app: &tauri::AppHandle) -> PluginStatus {
     let upia = find_upia();
-    let ccx = find_ccx(app);
+    let ccx = find_ccx(Some(app));
     let mut status = PluginStatus {
         upia_available: upia.is_some(),
         ccx_found: ccx.is_some(),
@@ -103,6 +105,10 @@ pub struct InstallResult {
 }
 
 pub fn install_plugin(app: &tauri::AppHandle) -> Result<InstallResult, String> {
+    install_plugin_inner(Some(app))
+}
+
+fn install_plugin_inner(app: Option<&tauri::AppHandle>) -> Result<InstallResult, String> {
     let upia_path = find_upia().ok_or_else(|| {
         "Adobe Unified Plugin Installer Agent (UPIA) was not found. Please ensure Adobe Creative Cloud is installed.".to_string()
     })?;
@@ -133,8 +139,10 @@ pub fn install_plugin(app: &tauri::AppHandle) -> Result<InstallResult, String> {
         let stderr = String::from_utf8_lossy(&output.stderr);
 
         if output.status.success() || stdout.to_lowercase().contains("successful") {
-            if let Some(bridge) = app.try_state::<std::sync::Arc<crate::bridge::Bridge>>() {
-                bridge.publish_session_now();
+            if let Some(app) = app {
+                if let Some(bridge) = app.try_state::<std::sync::Arc<crate::bridge::Bridge>>() {
+                    bridge.publish_session_now();
+                }
             }
             Ok(InstallResult {
                 success: true,
@@ -155,6 +163,14 @@ pub fn install_plugin(app: &tauri::AppHandle) -> Result<InstallResult, String> {
 }
 
 pub fn ensure_latest_plugin_installed(app: &tauri::AppHandle) {
+    ensure_latest_plugin_installed_inner(Some(app));
+}
+
+pub fn ensure_latest_plugin_installed_headless() {
+    ensure_latest_plugin_installed_inner(None);
+}
+
+fn ensure_latest_plugin_installed_inner(app: Option<&tauri::AppHandle>) {
     #[cfg(windows)]
     {
         let Some(ccx_path) = find_ccx(app) else {
@@ -181,7 +197,7 @@ pub fn ensure_latest_plugin_installed(app: &tauri::AppHandle) {
             }
         }
 
-        let _ = install_plugin(app);
+        let _ = install_plugin_inner(app);
     }
     #[cfg(not(windows))]
     {

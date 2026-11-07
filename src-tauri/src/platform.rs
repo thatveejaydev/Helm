@@ -36,6 +36,16 @@ pub fn is_premiere_process_alive(pid: u32) -> bool {
 
 #[cfg(windows)]
 pub fn premiere_pids() -> std::collections::HashSet<u32> {
+    premiere_pids_filtered(true)
+}
+
+#[cfg(windows)]
+pub fn is_premiere_running() -> bool {
+    !premiere_pids_filtered(false).is_empty()
+}
+
+#[cfg(windows)]
+fn premiere_pids_filtered(visible_only: bool) -> std::collections::HashSet<u32> {
     use std::collections::HashSet;
     use windows_sys::Win32::{
         Foundation::{HWND, LPARAM},
@@ -43,13 +53,14 @@ pub fn premiere_pids() -> std::collections::HashSet<u32> {
     };
 
     struct PidScan {
+        visible_only: bool,
         checked: HashSet<u32>,
         found: HashSet<u32>,
     }
 
     unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> i32 {
         let state = &mut *(lparam as *mut PidScan);
-        if IsWindowVisible(hwnd) == 0 {
+        if state.visible_only && IsWindowVisible(hwnd) == 0 {
             return 1;
         }
         let mut pid = 0;
@@ -61,6 +72,7 @@ pub fn premiere_pids() -> std::collections::HashSet<u32> {
     }
 
     let mut state = PidScan {
+        visible_only,
         checked: HashSet::new(),
         found: HashSet::new(),
     };
@@ -175,6 +187,10 @@ pub fn is_premiere_process_alive(_: u32) -> bool {
 #[cfg(not(windows))]
 pub fn premiere_pids() -> std::collections::HashSet<u32> {
     std::collections::HashSet::new()
+}
+#[cfg(not(windows))]
+pub fn is_premiere_running() -> bool {
+    true
 }
 #[cfg(not(windows))]
 pub fn foreground_premiere() -> Option<isize> {
