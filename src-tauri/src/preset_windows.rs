@@ -40,20 +40,28 @@ pub fn attributes_shortcut(target: isize, paste: bool) -> Result<(), String> {
     inject(&input)
 }
 
+fn effect_controls_keys(shift_held: bool) -> Vec<INPUT> {
+    let down = KEYBD_EVENT_FLAGS(0);
+    let mut input = Vec::with_capacity(4);
+    if !shift_held {
+        input.push(key(VK_SHIFT, 0, down));
+    }
+    input.extend([key(VK_5, 0, down), key(VK_5, 0, KEYEVENTF_KEYUP)]);
+    if !shift_held {
+        input.push(key(VK_SHIFT, 0, KEYEVENTF_KEYUP));
+    }
+    input
+}
+
 pub fn effect_controls_shortcut(target: isize) -> Result<(), String> {
-    let modifiers = [VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN];
+    let modifiers = [VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN];
     for _ in 0..40 {
         let released = modifiers.iter().all(|modifier| unsafe {
             GetAsyncKeyState(i32::from(modifier.0)) >= 0
         });
         if released && crate::platform::foreground_premiere() == Some(target) {
-            let down = KEYBD_EVENT_FLAGS(0);
-            return inject(&[
-                key(VK_SHIFT, 0, down),
-                key(VK_5, 0, down),
-                key(VK_5, 0, KEYEVENTF_KEYUP),
-                key(VK_SHIFT, 0, KEYEVENTF_KEYUP),
-            ]);
+            let shift_held = unsafe { GetAsyncKeyState(i32::from(VK_SHIFT.0)) } < 0;
+            return inject(&effect_controls_keys(shift_held));
         }
         sleep(Duration::from_millis(20));
     }
@@ -274,4 +282,34 @@ fn inject(input: &[INPUT]) -> Result<(), String> {
 
 fn move_cursor(point: POINT) -> Result<(), String> {
     unsafe { SetCursorPos(point.x, point.y) }.map_err(|_| "Could not move the pointer.".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key_events(input: &[INPUT]) -> Vec<(VIRTUAL_KEY, KEYBD_EVENT_FLAGS)> {
+        input
+            .iter()
+            .map(|event| unsafe { (event.Anonymous.ki.wVk, event.Anonymous.ki.dwFlags) })
+            .collect()
+    }
+
+    #[test]
+    fn effect_controls_keys_synthesizes_shift_only_when_released() {
+        let down = KEYBD_EVENT_FLAGS(0);
+        assert_eq!(
+            key_events(&effect_controls_keys(false)),
+            vec![
+                (VK_SHIFT, down),
+                (VK_5, down),
+                (VK_5, KEYEVENTF_KEYUP),
+                (VK_SHIFT, KEYEVENTF_KEYUP),
+            ]
+        );
+        assert_eq!(
+            key_events(&effect_controls_keys(true)),
+            vec![(VK_5, down), (VK_5, KEYEVENTF_KEYUP)]
+        );
+    }
 }

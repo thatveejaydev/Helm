@@ -23,9 +23,9 @@ use tauri::{
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 const DEFAULT_SHORTCUT: &str = "Ctrl+Alt+Space";
-const PALETTE_WIDTH: f64 = 640.0;
-const COMPACT_HEIGHT: f64 = 126.0;
-const EXPANDED_HEIGHT: f64 = 566.0;
+const PALETTE_WIDTH: f64 = 500.0;
+const COMPACT_HEIGHT: f64 = 96.0;
+const EXPANDED_HEIGHT: f64 = 390.0;
 
 struct FocusTarget(AtomicIsize);
 

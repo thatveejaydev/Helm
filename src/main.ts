@@ -9,7 +9,7 @@ import "./style.css";
 
 document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
   <section id="palette">
-    <div class="search-box"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" stroke="currentColor" stroke-width="1.7"/><path d="m16 16 4.5 4.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg><input id="search" placeholder="Search effects, project media, and actions…" aria-label="Search effects, project media, and actions" role="combobox" aria-autocomplete="list" aria-controls="results" aria-expanded="true" autocomplete="off" spellcheck="false" /><kbd>ESC</kbd></div>
+    <div class="search-box"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" stroke="currentColor" stroke-width="1.7"/><path d="m16 16 4.5 4.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg><input id="search" placeholder="Search effects, project media, and actions…" aria-label="Search effects, project media, and actions" role="combobox" aria-autocomplete="list" aria-controls="results" aria-expanded="true" autocomplete="off" spellcheck="false" /><kbd>ESC</kbd></div>
     <div class="search-modes" role="group" aria-label="Search mode">
       <button id="all-mode" type="button" aria-pressed="true">All</button>
       <button id="effects-mode" type="button" aria-pressed="false">Effects</button>
@@ -31,43 +31,47 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
     <div id="empty" class="empty" hidden><span class="empty-symbol">⌕</span><h2 id="empty-title"></h2><p id="empty-message"></p><button id="setup-button" class="secondary" hidden>Connect to Premiere</button></div>
   </section>
   <section id="settings" aria-labelledby="settings-title" hidden>
-    <button id="back" type="button"><span aria-hidden="true">←</span> Back to search</button>
-    <h1 id="settings-title">Settings</h1>
-    <section class="settings-group">
-      <h2>Premiere connection</h2>
+    <header class="settings-header">
+      <div class="settings-title-group">
+        <button id="back" type="button" aria-label="Back to search" title="Back to search">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5m7-7-7 7 7 7"/></svg>
+        </button>
+        <h1 id="settings-title">Settings</h1>
+      </div>
+      <kbd class="settings-esc">ESC</kbd>
+    </header>
+    <section class="settings-card connection-card" aria-label="Premiere connection">
+      <div class="settings-row">
+        <div class="connection-status-block">
+          <span id="plugin-status-dot" class="status-dot" aria-hidden="true"></span>
+          <div>
+            <div id="plugin-status-text" class="settings-item-title">Checking plugin status…</div>
+            <p id="plugin-status-hint">Helm connects automatically when Premiere loads the bridge.</p>
+          </div>
+        </div>
+        <div class="connection-actions">
+          <button id="refresh" class="secondary refresh-button" type="button" aria-label="Refresh catalogs">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+            <span>Refresh Catalogs</span>
+          </button>
+          <button id="install-plugin-btn" class="secondary" type="button">Install</button>
+        </div>
+      </div>
+    </section>
+    <section class="settings-card preferences-card" aria-label="Preferences">
       <div class="settings-row">
         <div>
-          <div class="plugin-install-status"><span id="plugin-status-dot" class="status-dot" aria-hidden="true"></span><span id="plugin-status-text">Checking plugin status…</span></div>
-          <p id="plugin-status-hint">Helm connects automatically when Premiere loads the bridge.</p>
+          <div class="settings-item-title">Palette Shortcut</div>
+          <p>Global shortcut to summon Helm in Premiere</p>
         </div>
-        <button id="install-plugin-btn" class="secondary" type="button">Install to Premiere</button>
-      </div>
-    </section>
-    <section class="settings-group">
-      <h2>Keyboard shortcut</h2>
-      <div class="settings-row">
-        <span>Open Helm floating palette</span>
         <div class="shortcut-controls"><button id="record-shortcut" class="shortcut-button" type="button" aria-label="Change shortcut" title="Click to record a new shortcut"><kbd id="shortcut">Ctrl + Alt + Space</kbd></button><button id="reset-shortcut" class="shortcut-reset" type="button" aria-label="Reset to default shortcut" title="Reset to default (Ctrl + Alt + Space)">↺</button></div>
       </div>
-    </section>
-    <section class="settings-group">
-      <h2>Audio preview</h2>
       <div class="settings-row">
-        <div><label for="auto-preview-audio">Auto-preview audio</label><p id="auto-preview-description">Play the highlighted audio result after a short pause. Press Alt + P to play or stop a preview manually.</p></div>
+        <div><label for="auto-preview-audio" class="settings-item-title">Auto-preview Audio</label><p id="auto-preview-description">Play highlighted audio results automatically (or press Alt + P)</p></div>
         <input id="auto-preview-audio" type="checkbox" role="switch" aria-describedby="auto-preview-description" />
       </div>
-    </section>
-    <section class="settings-group">
-      <h2>Catalogs</h2>
       <div class="settings-row">
-        <div>Refresh catalogs<p>Update the items available in search.</p></div>
-        <button id="refresh" class="primary" type="button" aria-label="Refresh catalogs">Refresh</button>
-      </div>
-    </section>
-    <section class="settings-group">
-      <h2>Diagnostics</h2>
-      <div class="settings-row">
-        <div><label for="show-project-log">Project debug log</label><p id="project-log-description">Show a separate window with project logs.</p></div>
+        <div><label for="show-project-log" class="settings-item-title">Project Debug Log</label><p id="project-log-description">Show live catalog and lookup diagnostics window</p></div>
         <input id="show-project-log" type="checkbox" role="switch" aria-describedby="project-log-description" />
       </div>
     </section>
@@ -76,6 +80,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
     <div class="brand"><img class="brand-mark" src="${helmIcon}" alt="" /> HELM <span id="connection" class="connection" role="img" aria-label="Connecting to Premiere"></span></div>
     <div class="footer-info"><span id="status" role="status">Ready when you are.</span></div>
     <div class="footer-actions">
+      <span id="settings-footer-badge" class="footer-badge" hidden>v0.1.0 · Ready</span>
       <button id="settings-toggle" class="icon-button" aria-label="Connection settings" title="Connection settings">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="m10 3-.7 2.3-2 .9-2.2-1-2 3.5 1.8 1.6v3.4l-1.8 1.6 2 3.5 2.2-1 2 .9L10 21h4l.7-2.3 2-.9 2.2 1 2-3.5-1.8-1.6v-3.4l1.8-1.6-2-3.5-2.2 1-2-.9L14 3z" />
@@ -292,6 +297,8 @@ function openSettings(open: boolean): void {
   element("palette").hidden = open;
   element("settings").hidden = !open;
   element("settings-toggle").hidden = open;
+  element("settings-footer-badge").hidden = !open;
+  element("palette-footer").classList.toggle("settings-mode", open);
   updatePaletteSize();
   if (open) {
     element("back").focus();
@@ -606,7 +613,7 @@ function createResultRow(effect: PaletteItem, tree: boolean): HTMLElement {
   icon.className = `effect-icon ${effect.kind}`;
   icon.textContent = { video: "ƒx", audio: "♫", preset: "◇", action: "", project: "▤" }[effect.kind];
   if (effect.kind === "action") {
-    icon.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="${actionIconPaths[effect.id]}" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+    icon.innerHTML = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="${actionIconPaths[effect.id]}" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
   }
   if (effect.kind === "project") {
     const mediaType = effect.mediaType ?? "other";
@@ -641,12 +648,19 @@ function createResultRow(effect: PaletteItem, tree: boolean): HTMLElement {
     : effect.kind === "action" && effect.shortcutId ? { ...effect, id: effect.shortcutId } : undefined;
   if (shortcutTarget) {
     const accelerator = effectShortcuts[shortcutTarget.id];
+    row.classList.add("has-effect-shortcut");
     if (accelerator && !isTypingShortcut(accelerator)) {
       const badge = document.createElement("kbd");
       badge.className = "effect-shortcut-badge";
       badge.textContent = accelerator.replaceAll("+", " + ");
-      row.classList.add("has-effect-shortcut");
       row.append(badge);
+    } else {
+      const hint = document.createElement("span");
+      hint.className = "effect-shortcut-assignable";
+      hint.title = "Right-click to assign shortcut";
+      hint.setAttribute("aria-hidden", "true");
+      hint.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2.5"/><path d="M6 9h2m3 0h2m3 0h2M7 14h10"/></svg>';
+      row.append(hint);
     }
     row.addEventListener("contextmenu", (event) => showEffectShortcutMenu(shortcutTarget, event));
   }
@@ -979,6 +993,8 @@ function update(next: BridgeSnapshot): void {
   const connection = element("connection");
   connection.setAttribute("aria-label", next.connected ? "Premiere connected" : "Premiere offline");
   connection.classList.toggle("online", next.connected);
+  element("settings-footer-badge").textContent = next.connected ? "v0.1.0 · Ready" : "v0.1.0 · Offline";
+  if (settingsOpen && wasConnected !== next.connected) void refreshPluginStatus();
   if (!recordingShortcut) {
     element("shortcut").textContent = next.shortcut.replaceAll("+", " + ");
   }
@@ -1244,21 +1260,21 @@ async function refreshPluginStatus(): Promise<void> {
     const status = await invoke<PluginStatus>("get_premiere_plugin_status");
     if (status.installed) {
       dot.className = "status-dot online";
-      text.textContent = "Installed in Premiere Pro";
-      hint.textContent = "Helm Bridge is registered. Open Window → UXP Plugins in Premiere.";
-      btn.textContent = "Reinstall Plugin";
+      text.textContent = snapshot?.connected ? "Helm Bridge Connected" : "Installed in Premiere Pro";
+      hint.textContent = "Registered in Premiere Pro · Window → UXP Plugins";
+      btn.textContent = "Reinstall";
       btn.disabled = false;
     } else if (status.upia_available) {
       dot.className = "status-dot";
       text.textContent = "Not installed in Premiere Pro";
       hint.textContent = "Install Helm Bridge automatically with one click.";
-      btn.textContent = "Install to Premiere";
+      btn.textContent = "Install";
       btn.disabled = false;
     } else {
       dot.className = "status-dot offline";
       text.textContent = "Adobe UPIA not found";
-      hint.textContent = "Ensure Adobe Creative Cloud is installed, or use Developer Tools below.";
-      btn.textContent = "Install to Premiere";
+      hint.textContent = "Ensure Adobe Creative Cloud is installed.";
+      btn.textContent = "Install";
       btn.disabled = true;
     }
   } catch (e) {
@@ -1281,9 +1297,9 @@ async function handleInstallPlugin(): Promise<void> {
     const res = await invoke<InstallResult>("install_premiere_plugin");
     if (res.success) {
       dot.className = "status-dot online";
-      text.textContent = "Installed successfully!";
-      hint.textContent = "Helm Bridge is installed in Premiere Pro. Open Premiere to use.";
-      btn.textContent = "Reinstall Plugin";
+      text.textContent = snapshot?.connected ? "Helm Bridge Connected" : "Installed in Premiere Pro";
+      hint.textContent = "Registered in Premiere Pro · Window → UXP Plugins";
+      btn.textContent = "Reinstall";
       setStatus("Helm Bridge installed into Premiere Pro.");
     }
   } catch (err) {
